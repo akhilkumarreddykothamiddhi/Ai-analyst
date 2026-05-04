@@ -1,0 +1,31 @@
+# ── Secrets — NEVER commit real credentials ─────────────────────
+.streamlit/secrets.toml
+
+# ── Python ──────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Environments ────────────────────────────────────────────────
+.env
+.venv
+venv/
+env/
+ENV/
+
+# ── OS / Editor ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Logs ────────────────────────────────────────────────────────
+*.log
+logs/
