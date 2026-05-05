@@ -1,9 +1,16 @@
 """
-Techwish AI Analytics — Flask Backend
-======================================
+Techwish AI Analytics — Flask Backend (FIXED)
+==============================================
+Fixes applied:
+  1. SQL generated & validated at schedule-creation time (NL mode)
+  2. _run_due_reports now updates last_status even on crash + logs full traceback
+  3. run_query_direct has login_timeout + network_timeout
+  4. SMTP test endpoint added  (/api/test-email)
+  5. send_scheduled_email has better error reporting
+  6. Scheduler loop logs SQL before running so empty-SQL is caught early
+  7. submitSchedule UI fix: NL questions get SQL resolved before saving
 Run:  python app.py
 Opens browser at http://localhost:5000 automatically.
-Scheduler starts in a background thread (no separate process needed).
 """
 
 import os, sys, json, re as _re, uuid, datetime, threading, time, io, base64
@@ -120,9 +127,21 @@ def run_query(sql: str, database: str) -> pd.DataFrame:
             return _exec(_sf_conn)
         raise
 
+# FIX ❸: Added login_timeout + network_timeout to prevent silent hangs
 def run_query_direct(sql: str, database: str) -> pd.DataFrame:
     sql = sql.strip().rstrip(";").strip()
-    conn = _new_conn(database)
+    if not sql:
+        raise ValueError("SQL is empty — cannot execute query.")
+    conn = snowflake.connector.connect(
+        account=SNOWFLAKE_ACCOUNT,
+        user=SNOWFLAKE_USER,
+        password=SNOWFLAKE_PASSWORD,
+        warehouse=SNOWFLAKE_WAREHOUSE,
+        role=SNOWFLAKE_ROLE if SNOWFLAKE_ROLE else None,
+        database=database,
+        login_timeout=30,       # FIX: was missing — prevents silent hang on suspended warehouse
+        network_timeout=120,    # FIX: was missing
+    )
     try:
         cur = conn.cursor()
         cur.execute(sql)
@@ -146,8 +165,6 @@ def list_databases() -> list:
 _schema_cache: dict = {}
 _whitelist_cache: dict = {}
 _schema_dict_cache: dict = {}
-
-# NEW: cache for exact column names per table (preserving original casing)
 _exact_columns_cache: dict = {}
 
 def load_schema(database: str) -> str:
@@ -209,10 +226,6 @@ def build_full_schema_dict(database: str) -> dict:
         return {}
 
 def get_exact_columns(database: str) -> dict:
-    """
-    Returns {TABLE_NAME: [col1_exact, col2_exact, ...]} preserving EXACT original casing
-    from INFORMATION_SCHEMA. This is the single source of truth for column names.
-    """
     if database in _exact_columns_cache:
         return _exact_columns_cache[database]
     sql = f"""
@@ -224,8 +237,8 @@ def get_exact_columns(database: str) -> dict:
         df = run_query(sql, database)
         result = {}
         for _, row in df.iterrows():
-            tbl  = row["TABLE_NAME"]   # exact casing as stored
-            col  = row["COLUMN_NAME"]  # exact casing as stored
+            tbl  = row["TABLE_NAME"]
+            col  = row["COLUMN_NAME"]
             dtype = row["DATA_TYPE"]
             result.setdefault(tbl, []).append((col, dtype))
         _exact_columns_cache[database] = result
@@ -234,21 +247,10 @@ def get_exact_columns(database: str) -> dict:
         return {}
 
 # ─────────────────────────────────────────────────────────────────
-#  SCHEMA BLOCK BUILDER — the key fix for casing errors
+#  SCHEMA BLOCK BUILDERS
 # ─────────────────────────────────────────────────────────────────
 
 def build_exact_schema_block(database: str) -> str:
-    """
-    Builds the schema block shown to the LLM using EXACT column names from
-    INFORMATION_SCHEMA. The LLM MUST copy these names verbatim — no guessing.
-    Format:
-        TABLE: DIM_DATE
-          Columns (copy EXACTLY, case-sensitive):
-            "YEAR"         NUMBER
-            "MONTH"        NUMBER
-            "ID"           NUMBER
-            ...
-    """
     exact = get_exact_columns(database)
     lines = []
     for tbl, cols in exact.items():
@@ -258,36 +260,25 @@ def build_exact_schema_block(database: str) -> str:
             lines.append(f'    "{col}"    {dtype}')
     return "\n".join(lines)
 
-
 def build_join_hints(database: str) -> str:
-    """
-    Auto-detects likely join keys by matching column names across tables.
-    e.g. FACT_BILLING.DATE_KEY → DIM_DATE.ID
-    """
     exact = get_exact_columns(database)
-
-    # Build lookup: col_name_upper → [(table, exact_col_name), ...]
     col_map: dict = {}
     for tbl, cols in exact.items():
         for col, dtype in cols:
             col_map.setdefault(col.upper(), []).append((tbl, col))
 
     hints = []
-    # Common FK patterns: *_KEY, *_ID, *_SK in FACT tables linking to DIM tables
     for tbl, cols in exact.items():
         if not tbl.upper().startswith("FACT"):
             continue
         for col, dtype in cols:
             cu = col.upper()
             if cu.endswith("_KEY") or cu.endswith("_ID") or cu.endswith("_SK"):
-                # Find matching DIM table column
-                # e.g. DATE_KEY → look for ID or DATE_KEY in DIM tables
                 candidates = []
                 for dim_tbl, dim_cols in exact.items():
                     if not dim_tbl.upper().startswith("DIM"):
                         continue
                     dim_col_names_upper = [c.upper() for c, _ in dim_cols]
-                    # Match: FACT.DATE_KEY → DIM_DATE.ID or DIM_DATE.DATE_KEY
                     base = cu.replace("_KEY","").replace("_ID","").replace("_SK","")
                     if "ID" in dim_col_names_upper:
                         exact_id = next(c for c, _ in dim_cols if c.upper() == "ID")
@@ -305,7 +296,6 @@ def build_join_hints(database: str) -> str:
         return "\nLIKELY JOIN CONDITIONS (use these exact column names):\n" + "\n".join(hints)
     return ""
 
-
 def build_time_series_hints(schema_dict: dict) -> str:
     classified = classify_columns(schema_dict)
     lines = [
@@ -318,20 +308,16 @@ def build_time_series_hints(schema_dict: dict) -> str:
         "3. NO GUESSING: If a column is not in the EXACT SCHEMA BLOCK, do not use it.",
         "4. COPY COLUMN NAMES VERBATIM from the schema block — do not change case.",
     ]
-
     for tbl, cats in classified.items():
         if "DIM_DATE" in tbl.upper():
             lines.append(f"\n[{tbl}] — use these for time grouping:")
             if cats["year_cols"]:
                 lines.append(f"  🎯 YEAR column(s): {', '.join(cats['year_cols'])}")
             if cats["num_cols"]:
-                # month candidates
                 month_cols = [c for c in cats["num_cols"] if "month" in c.lower() or "mon" in c.lower()]
                 if month_cols:
                     lines.append(f"  🎯 MONTH column(s): {', '.join(month_cols)}")
-
     return "\n".join(lines)
-
 
 def build_date_type_hints(schema_dict: dict) -> str:
     native_date, native_ts, num_date = [], [], []
@@ -354,7 +340,6 @@ def build_date_type_hints(schema_dict: dict) -> str:
         lines.append("⚠️  NUMERIC date cols — use TO_DATE(LPAD(CAST(col AS VARCHAR),8,'0'),'YYYYMMDD'):")
         lines += [f"   • {c}" for c in num_date]
     return "\n".join(lines)
-
 
 # ─────────────────────────────────────────────────────────────────
 #  DATE HELPERS
@@ -472,8 +457,8 @@ def classify_columns(schema_dict: dict) -> dict:
     NUM_TYPES    = {"NUMBER","NUMERIC","INTEGER","INT","BIGINT","SMALLINT","TINYINT",
                     "FLOAT","FLOAT4","FLOAT8","DOUBLE","DOUBLE PRECISION","REAL","DECIMAL"}
     TEXT_TYPES   = {"VARCHAR","TEXT","STRING","CHAR","CHARACTER","NCHAR","NVARCHAR"}
-    DATEKEY_KW   = ("key","datekey","date_key","sk","dt","dat","_date","date_")
     YEAR_KW      = ("year","yr","fiscal_year","cal_year")
+    DATEKEY_KW   = ("key","datekey","date_key","sk","dt","dat","_date","date_")
 
     for tbl, cols in schema_dict.items():
         year_cols = []; datekey_cols = []; date_cols = []
@@ -526,18 +511,15 @@ def is_percentage_query(q: str) -> bool:
         "ratio","composition","pie","donut","split","contribution"])
 
 def nl_to_sql(question: str, history: list, database: str) -> dict:
-    # ── Build all schema context ──
     wl           = build_whitelist(database)
     schema_dict  = build_full_schema_dict(database)
-    exact_block  = build_exact_schema_block(database)      # ← NEW: exact casing
-    join_hints   = build_join_hints(database)              # ← NEW: auto join keys
+    exact_block  = build_exact_schema_block(database)
+    join_hints   = build_join_hints(database)
     date_hints   = build_date_type_hints(schema_dict)
     ts_hints     = build_time_series_hints(schema_dict)
 
-    # ── Compact column list for user_msg ──
     compact_block = "\n".join(f"  {t}: {', '.join(c)}" for t, c in wl.items())
 
-    # ── Pull last assistant turn for appearance-only edits ──
     last_sql = ""; last_chart = "none"
     last_chart_x = last_chart_y = last_chart_title = last_summary = ""
     last_chart_color = last_title_color = None; last_df = None
@@ -576,9 +558,6 @@ def nl_to_sql(question: str, history: list, database: str) -> dict:
             "chart_color": new_chart_color, "title_color": last_title_color, "_reuse_df": last_df,
         }
 
-    # ─────────────────────────────────────────────────────────────
-    #  SYSTEM PROMPT — exact schema block is the centrepiece
-    # ─────────────────────────────────────────────────────────────
     system_prompt = f"""You are a Snowflake SQL expert. Your job is to write a single valid Snowflake SQL query.
 Strict Constraints:
 
@@ -590,7 +569,7 @@ Column Mapping: Ensure attributes belong to the correct table. Join Dim tables t
 
 Date Integrity: For year/month extraction, use DATE_PART or EXTRACT. If formatting as a string, ensure the CAST happens before the LPAD.
 
-No Ambiguity: If a column name exists in multiple joined tables, you must specify the source table to avoid "Ambiguous Identifier" errors.Alias Discipline: Always use table aliases (e.g., f for Fact, d for Dim) and prefix every column reference with the appropriate alias to avoid ambiguous identifier errors.
+No Ambiguity: If a column name exists in multiple joined tables, you must specify the source table to avoid "Ambiguous Identifier" errors. Alias Discipline: Always use table aliases (e.g., f for Fact, d for Dim) and prefix every column reference with the appropriate alias to avoid ambiguous identifier errors.
 ══════════════════════════════════════════════════════
 🔴 RULE 0 — MOST IMPORTANT: COPY COLUMN NAMES EXACTLY
 ══════════════════════════════════════════════════════
@@ -668,69 +647,33 @@ Steps:
 
 Return ONLY the JSON object."""
 
-    # ─────────────────────────────────────────────────────────────
-    #  ROBUST JSON PARSER — handles all Groq output quirks
-    # ─────────────────────────────────────────────────────────────
     def _safe_parse_json(raw: str) -> dict:
-        """
-        Multi-strategy JSON parser that handles:
-        - Markdown code fences
-        - Literal newlines/tabs inside string values
-        - Trailing commas
-        - Extra text before/after JSON
-        """
-        # 1. Strip code fences
         raw = _re.sub(r'^```[a-z]*\s*', '', raw, flags=_re.MULTILINE)
         raw = _re.sub(r'```\s*$', '', raw, flags=_re.MULTILINE)
         raw = raw.strip()
-
-        # 2. Extract the first JSON object
         jm = _re.search(r'\{.*\}', raw, _re.DOTALL)
-        if jm:
-            raw = jm.group(0)
+        if jm: raw = jm.group(0)
+        try: return json.loads(raw)
+        except json.JSONDecodeError: pass
 
-        # 3. Try direct parse first
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-
-        # 4. Fix literal newlines/tabs INSIDE quoted strings only
-        # Strategy: replace newlines/tabs between quotes with spaces
         def _fix_string_literals(s: str) -> str:
-            result = []
-            in_str = False
-            escape_next = False
+            result = []; in_str = False; escape_next = False
             for ch in s:
-                if escape_next:
-                    result.append(ch)
-                    escape_next = False
-                elif ch == '\\':
-                    result.append(ch)
-                    escape_next = True
-                elif ch == '"':
-                    result.append(ch)
-                    in_str = not in_str
-                elif in_str and ch in ('\n', '\r', '\t'):
-                    result.append(' ')  # replace control chars inside strings
-                else:
-                    result.append(ch)
+                if escape_next: result.append(ch); escape_next = False
+                elif ch == '\\': result.append(ch); escape_next = True
+                elif ch == '"': result.append(ch); in_str = not in_str
+                elif in_str and ch in ('\n', '\r', '\t'): result.append(' ')
+                else: result.append(ch)
             return ''.join(result)
 
         cleaned = _fix_string_literals(raw)
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
+        try: return json.loads(cleaned)
+        except json.JSONDecodeError: pass
 
-        # 5. Nuclear option: collapse all whitespace and try again
         collapsed = _re.sub(r'\s+', ' ', raw)
-        try:
-            return json.loads(collapsed)
-        except json.JSONDecodeError:
-            pass
+        try: return json.loads(collapsed)
+        except json.JSONDecodeError: pass
 
-        # 6. Extract individual fields with regex as last resort
         sql_m     = _re.search(r'"sql"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, _re.DOTALL)
         summary_m = _re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, _re.DOTALL)
         chart_m   = _re.search(r'"chart"\s*:\s*"([^"]*)"', raw)
@@ -747,7 +690,6 @@ Return ONLY the JSON object."""
                 "chart_y":     chart_y_m.group(1) if chart_y_m else "",
                 "chart_title": chart_t_m.group(1) if chart_t_m else "",
             }
-
         raise ValueError(f"Could not parse JSON from Groq response: {raw[:300]}")
 
     def _call_groq(extra: str = "") -> dict:
@@ -759,9 +701,7 @@ Return ONLY the JSON object."""
                 "content": m["content"] if m["role"] == "user" else m.get("summary","")
             })
         msgs.append({"role":"user","content": user_msg})
-
         client = Groq(api_key=GROQ_API_KEY)
-
         for attempt in range(3):
             try:
                 resp = client.chat.completions.create(
@@ -772,10 +712,8 @@ Return ONLY the JSON object."""
                 )
                 raw = resp.choices[0].message.content.strip()
                 return _safe_parse_json(raw)
-
             except ValueError as e:
-                if attempt == 2:
-                    raise
+                if attempt == 2: raise
                 continue
             except Exception as e:
                 if "429" in str(e) or "rate" in str(e).lower():
@@ -921,7 +859,8 @@ def save_scheduled_reports(reports: list):
             _log_sched(f"Save failed: {e}")
 
 def add_scheduled_report(name,question,sql,database,interval_minutes,recipients,
-                          chart_type="none",chart_x="",chart_y="",chart_color=DEFAULT_CHART_COLOR,chart_title="") -> dict:
+                          chart_type="none",chart_x="",chart_y="",
+                          chart_color=DEFAULT_CHART_COLOR,chart_title="") -> dict:
     report = {
         "id": uuid.uuid4().hex[:8], "name":name, "question":question, "sql":sql,
         "database":database, "interval_minutes":interval_minutes, "recipients":recipients,
@@ -946,9 +885,10 @@ def df_to_html_table(df: pd.DataFrame, max_rows: int = 50) -> str:
     note = f'<p style="color:gray;font-size:0.75rem;margin-top:6px;">Showing {len(prev)} of {len(df)} rows. Full data in CSV attachment.</p>' if len(df) > max_rows else ""
     return f'<table style="border-collapse:collapse;width:100%;font-size:0.85rem;"><thead><tr>{hdr}</tr></thead><tbody>{body}</tbody></table>{note}'
 
+# FIX ❷ + ❹: Better error reporting in send_scheduled_email
 def send_scheduled_email(report: dict, df: pd.DataFrame):
     if not SMTP_USER or not SMTP_PASSWORD:
-        return False, "SMTP credentials not configured."
+        return False, "SMTP credentials not configured. Check SMTP_USER and SMTP_PASSWORD in secrets.toml."
     name  = report.get("name","Report"); database = report.get("database","")
     question = report.get("question",""); sql = report.get("sql","")
     now_str  = datetime.datetime.now().strftime("%B %d, %Y at %I:%M %p")
@@ -1009,15 +949,24 @@ def send_scheduled_email(report: dict, df: pd.DataFrame):
             safe = _re.sub(r"[^a-zA-Z0-9_]","_",name)+".csv"
             csv_part.add_header("Content-Disposition",f'attachment; filename="{safe}"')
             msg.attach(csv_part)
-        server = smtplib.SMTP(SMTP_HOST,SMTP_PORT,timeout=30)
-        server.ehlo(); server.starttls(); server.ehlo()
-        server.login(SMTP_USER,SMTP_PASSWORD)
-        server.sendmail(SMTP_USER,report.get("recipients",[]),msg.as_string())
+
+        # FIX ❹: More robust SMTP connection with explicit timeout
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(SMTP_USER, report.get("recipients",[]), msg.as_string())
         server.quit()
         return True, ""
+    except smtplib.SMTPAuthenticationError as e:
+        return False, f"SMTP Auth failed — if using Gmail, you need an App Password (not your login password). Error: {e}"
+    except smtplib.SMTPException as e:
+        return False, f"SMTP error: {e}"
     except Exception as e:
-        return False, str(e)
+        return False, f"Unexpected email error: {e}"
 
+# FIX ❶ + ❷: _run_due_reports now checks for empty SQL, updates status on crash, logs full traceback
 def _run_due_reports():
     reports = get_scheduled_reports()
     changed = False
@@ -1030,31 +979,67 @@ def _run_due_reports():
             try:
                 if now < datetime.datetime.fromisoformat(last) + datetime.timedelta(minutes=mins): continue
             except Exception: pass
+
         _log_sched(f"Running '{r.get('name')}' → {r.get('recipients')}")
+
+        # FIX ❶: Guard against empty SQL — catch it early with a clear message
+        sql = r.get("sql","").strip()
+        if not sql:
+            _log_sched(f"  SKIP: SQL is empty for report '{r.get('name')}' (id={r.get('id')}). Regenerating from question...")
+            q = r.get("question","").strip()
+            db = r.get("database","")
+            if q and db:
+                try:
+                    gen = nl_to_sql(q, [], db)
+                    sql = gen.get("sql","").strip()
+                    if sql:
+                        r["sql"] = sql
+                        _log_sched(f"  Regenerated SQL: {sql[:80]}...")
+                    else:
+                        r["last_run"]    = now.isoformat()
+                        r["last_status"] = "Failed: Could not regenerate SQL from question"
+                        changed = True
+                        _log_sched(f"  FAIL: Could not generate SQL for '{r.get('name')}'")
+                        continue
+                except Exception as e:
+                    r["last_run"]    = now.isoformat()
+                    r["last_status"] = f"Failed: SQL regeneration error — {e}"
+                    changed = True
+                    continue
+            else:
+                r["last_run"]    = now.isoformat()
+                r["last_status"] = "Failed: SQL is empty and no question to regenerate from"
+                changed = True
+                continue
+
+        _log_sched(f"  SQL: {sql[:100]}...")
+
         try:
-            df      = run_query_direct(r["sql"],r["database"])
-            ok, err = send_scheduled_email(r,df)
+            df      = run_query_direct(sql, r.get("database",""))
+            ok, err = send_scheduled_email(r, df)
         except Exception as e:
-            ok, err = False, str(e)
+            ok  = False
+            err = traceback.format_exc()   # FIX ❷: full traceback, not just str(e)
+
         r["last_run"]    = now.isoformat()
-        r["last_status"] = "Sent" if ok else f"Failed: {err[:120]}"
+        r["last_status"] = "Sent" if ok else f"Failed: {str(err)[:300]}"
         r["run_count"]   = r.get("run_count",0)+1
         changed = True
-        _log_sched(f"  {'OK' if ok else 'FAIL'}: {r.get('name')}" + ("" if ok else f" — {err}"))
+        _log_sched(f"  {'OK' if ok else 'FAIL'}: {r.get('name')}" + ("" if ok else f"\n    {err[:400]}"))
+
     if changed: save_scheduled_reports(reports)
 
 def _scheduler_loop():
     _log_sched("Scheduler thread started.")
     while not _sched_stop.is_set():
         try: _run_due_reports()
-        except Exception as e: _log_sched(f"Scheduler error: {e}")
+        except Exception as e: _log_sched(f"Scheduler loop error: {traceback.format_exc()}")
         _sched_stop.wait(60)
     _log_sched("Scheduler thread stopped.")
 
 # ─────────────────────────────────────────────────────────────────
 #  FLASK ROUTES
 # ─────────────────────────────────────────────────────────────────
-
 
 @app.route("/")
 def index():
@@ -1063,6 +1048,7 @@ def index():
 @app.route("/<path:filename>")
 def serve_static(filename):
     return send_from_directory(str(BASE_DIR), filename)
+
 @app.route("/api/databases")
 def api_databases():
     return jsonify({"databases": list_databases()})
@@ -1122,7 +1108,7 @@ def api_query():
     result.pop("_reuse_df", None)
     return jsonify(result)
 
-# ── FIXED: relaxed validation — sql OR question must be present ──
+# FIX ❶: api_schedules_post now always resolves SQL before saving
 @app.route("/api/schedules", methods=["GET"])
 def api_schedules_get():
     return jsonify({"schedules": get_scheduled_reports()})
@@ -1131,31 +1117,53 @@ def api_schedules_get():
 def api_schedules_post():
     data = request.json or {}
 
-    # Relaxed validation: sql OR question must be present (not both required)
     required = ["name","database","interval_minutes","recipients"]
     for f in required:
         if not data.get(f): return jsonify({"error":f"Missing: {f}"}),400
-    if not data.get("sql","").strip() and not data.get("question","").strip():
+
+    question = (data.get("question") or "").strip()
+    sql      = (data.get("sql") or "").strip()
+
+    if not sql and not question:
         return jsonify({"error":"Missing: sql or question"}),400
 
-    question = data.get("question","")
-    sql = data.get("sql","").strip()
-
+    # FIX ❶: Always resolve SQL from question at creation time so scheduler never runs empty SQL
     if not sql and question:
-        r = nl_to_sql(question,[],data["database"])
-        sql = r.get("sql","").strip()
-        if not sql: return jsonify({"error":"Could not generate SQL from question"}),400
+        _log_sched(f"[POST /api/schedules] Generating SQL for question: {question}")
+        try:
+            r = nl_to_sql(question, [], data["database"])
+            sql = r.get("sql","").strip()
+            _log_sched(f"[POST /api/schedules] Generated SQL: {sql[:100]}")
+        except Exception as e:
+            return jsonify({"error":f"SQL generation failed: {e}"}),500
+
+        if not sql:
+            return jsonify({"error":"Could not generate SQL from question — please try rephrasing or use SQL mode."}),400
+
+    # Strip trailing semicolons
+    sql = sql.rstrip(";").strip()
+
+    # Validate SQL actually runs before saving the schedule
+    try:
+        test_df = run_query_direct(sql + " LIMIT 1", data["database"])
+        _log_sched(f"[POST /api/schedules] SQL validated OK — {len(test_df)} rows (test run)")
+    except Exception as e:
+        return jsonify({"error":f"SQL validation failed: {e}"}),400
 
     report = add_scheduled_report(
-        name=data["name"], question=question or data.get("name",""),
-        sql=sql.rstrip(";"), database=data["database"],
+        name=data["name"],
+        question=question or data.get("name",""),
+        sql=sql,
+        database=data["database"],
         interval_minutes=int(data["interval_minutes"]),
         recipients=[e.strip() for e in data["recipients"].split(",") if e.strip()],
         chart_type=data.get("chart_type","none"),
-        chart_x=data.get("chart_x",""), chart_y=data.get("chart_y",""),
+        chart_x=data.get("chart_x",""),
+        chart_y=data.get("chart_y",""),
         chart_color=data.get("chart_color",DEFAULT_CHART_COLOR),
         chart_title=data.get("chart_title",""),
     )
+    _log_sched(f"[POST /api/schedules] Created schedule '{report['name']}' id={report['id']}")
     return jsonify({"success":True,"report":report})
 
 @app.route("/api/schedules/<report_id>", methods=["DELETE"])
@@ -1176,25 +1184,73 @@ def api_schedule_toggle(report_id):
 @app.route("/api/schedules/<report_id>/run", methods=["POST"])
 def api_schedule_run(report_id):
     reports = get_scheduled_reports()
-    report  = next((r for r in reports if r["id"] == report_id),None)
+    report  = next((r for r in reports if r["id"] == report_id), None)
     if not report: return jsonify({"error":"Not found"}),404
+
+    sql = report.get("sql","").strip()
+
+    # FIX ❶: If SQL is empty, try to regenerate from question before running
+    if not sql:
+        q  = report.get("question","").strip()
+        db = report.get("database","")
+        if q and db:
+            try:
+                gen = nl_to_sql(q, [], db)
+                sql = gen.get("sql","").strip()
+                if sql:
+                    for r in reports:
+                        if r["id"] == report_id:
+                            r["sql"] = sql
+                    save_scheduled_reports(reports)
+                    report["sql"] = sql
+            except Exception as e:
+                return jsonify({"error":f"SQL regeneration failed: {e}"}),500
+        if not sql:
+            return jsonify({"error":"SQL is empty and could not be regenerated. Please delete and re-create this schedule."}),400
+
     try:
-        df = run_query_direct(report["sql"],report["database"])
-        ok, err = send_scheduled_email(report,df)
+        df = run_query_direct(sql, report["database"])
+        ok, err = send_scheduled_email(report, df)
         now = datetime.datetime.now().isoformat()
         for r in reports:
             if r["id"] == report_id:
-                r["last_run"] = now; r["last_status"] = "Sent" if ok else f"Failed: {err}"
-                r["run_count"] = r.get("run_count",0)+1
+                r["last_run"]    = now
+                r["last_status"] = "Sent" if ok else f"Failed: {err}"
+                r["run_count"]   = r.get("run_count",0)+1
         save_scheduled_reports(reports)
-        if ok: return jsonify({"success":True})
-        return jsonify({"error":err}),500
+        if ok:
+            return jsonify({"success":True})
+        return jsonify({"error": err}), 500
     except Exception as e:
-        return jsonify({"error":str(e)}),500
+        return jsonify({"error": traceback.format_exc()}), 500
+
+# FIX: SMTP test endpoint — visit /api/test-email to verify credentials
+@app.route("/api/test-email")
+def api_test_email():
+    """
+    Diagnostic endpoint — visit http://localhost:5000/api/test-email
+    Sends a test email to SMTP_USER to confirm credentials work.
+    """
+    if not SMTP_USER or not SMTP_PASSWORD:
+        return jsonify({"success":False,"error":"SMTP_USER or SMTP_PASSWORD not configured in secrets.toml"}), 400
+    try:
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        test_msg = f"Subject: Techwish SMTP Test\nFrom: {SMTP_USER}\nTo: {SMTP_USER}\n\nSMTP is working correctly!"
+        server.sendmail(SMTP_USER, [SMTP_USER], test_msg)
+        server.quit()
+        return jsonify({"success":True,"message":f"Test email sent to {SMTP_USER}. Check your inbox."})
+    except smtplib.SMTPAuthenticationError as e:
+        return jsonify({"success":False,"error":f"Auth failed — Gmail requires an App Password, not your login password. Details: {e}"}), 400
+    except Exception as e:
+        return jsonify({"success":False,"error":str(e)}), 500
 
 @app.route("/api/health")
 def api_health():
-    return jsonify({"status":"ok","scheduler":"running"})
+    return jsonify({"status":"ok","scheduler":"running","smtp_configured": bool(SMTP_USER and SMTP_PASSWORD)})
 
 # ─────────────────────────────────────────────────────────────────
 #  MAIN
@@ -1209,16 +1265,18 @@ if __name__ == "__main__":
     threading.Thread(target=_open_browser, daemon=True).start()
 
     print("\n" + "="*55)
-    print("  Techwish AI Analytics")
+    print("  Techwish AI Analytics (FIXED)")
     print("  http://localhost:5000")
     print("  Scheduler: running (background thread)")
+    print(f"  SMTP: {SMTP_USER or '(NOT CONFIGURED)'}")
+    print("  Test email: http://localhost:5000/api/test-email")
     print("="*55 + "\n")
 
-    def _shutdown(sig,frame):
+    def _shutdown(sig, frame):
         print("\nShutting down...")
         _sched_stop.set()
         sys.exit(0)
-    signal.signal(signal.SIGINT,_shutdown)
-    signal.signal(signal.SIGTERM,_shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
 
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
