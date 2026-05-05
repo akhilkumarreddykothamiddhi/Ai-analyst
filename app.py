@@ -10,13 +10,17 @@ Fixes applied:
   6. _run_due_reports full traceback logging + status update on every crash
   7. SMTP test endpoint at /api/test-email
   8. Scheduler loop logs SQL before running
+  9. [RENDER FIX] PORT read from environment variable
+ 10. [RENDER FIX] Removed browser auto-open (not applicable on server)
+ 11. [RENDER FIX] Keep-alive ping every 14 min to prevent free-tier sleep
 
 Run:  python app.py
 Opens browser at http://localhost:5000 automatically.
 """
 
 import os, sys, json, re as _re, uuid, datetime, threading, time, io, base64
-import pathlib, smtplib, traceback, webbrowser, signal
+import pathlib, smtplib, traceback, signal
+import urllib.request
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -1117,6 +1121,27 @@ def _scheduler_loop():
     _log_sched("Scheduler thread stopped.")
 
 # ─────────────────────────────────────────────────────────────────
+#  RENDER FIX 11 — KEEP-ALIVE PING
+#  Pings /api/health every 14 minutes so Render free tier stays awake.
+# ─────────────────────────────────────────────────────────────────
+def _keep_alive_loop():
+    """Ping self every 14 minutes to prevent Render free-tier sleep."""
+    _sched_stop.wait(60)          # wait 1 min after startup before first ping
+    while not _sched_stop.is_set():
+        try:
+            render_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+            if render_url:
+                req = urllib.request.Request(
+                    f"{render_url}/api/health",
+                    headers={"User-Agent": "TechwishKeepAlive/1.0"}
+                )
+                urllib.request.urlopen(req, timeout=10)
+                _log_sched(f"[keep-alive] ping OK → {render_url}/api/health")
+        except Exception as e:
+            _log_sched(f"[keep-alive] ping failed (non-fatal): {e}")
+        _sched_stop.wait(840)     # 14 minutes
+
+# ─────────────────────────────────────────────────────────────────
 #  FLASK ROUTES
 # ─────────────────────────────────────────────────────────────────
 
@@ -1349,21 +1374,26 @@ def api_health():
 #  MAIN
 # ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Start scheduler thread
     sched_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
     sched_thread.start()
 
-    def _open_browser():
-        time.sleep(1.5)
-        webbrowser.open("http://localhost:5000")
-    threading.Thread(target=_open_browser, daemon=True).start()
+    # RENDER FIX 11: Start keep-alive thread
+    keepalive_thread = threading.Thread(target=_keep_alive_loop, daemon=True, name="keepalive")
+    keepalive_thread.start()
+
+    # RENDER FIX 9 + 10: Read PORT from environment (Render sets this automatically).
+    # Browser auto-open removed — not applicable on a remote server.
+    port = int(os.environ.get("PORT", 5000))
 
     print("\n" + "="*60)
     print("  Techwish AI Analytics — FULLY FIXED")
-    print("  http://localhost:5000")
-    print("  Scheduler : running (background thread)")
-    print(f"  SMTP      : {SMTP_USER or '(NOT CONFIGURED)'}")
-    print("  Test email: http://localhost:5000/api/test-email")
-    print("  Health    : http://localhost:5000/api/health")
+    print(f"  http://0.0.0.0:{port}")
+    print("  Scheduler  : running (background thread)")
+    print("  Keep-alive : running (background thread)")
+    print(f"  SMTP       : {SMTP_USER or '(NOT CONFIGURED)'}")
+    print(f"  Test email : http://localhost:{port}/api/test-email")
+    print(f"  Health     : http://localhost:{port}/api/health")
     print("="*60 + "\n")
 
     def _shutdown(sig, frame):
@@ -1373,4 +1403,4 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
