@@ -98,6 +98,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
 .connected-badge{background:rgba(76,175,80,0.10);border:1px solid rgba(76,175,80,0.28);color:var(--green);font-size:0.65rem;padding:3px 9px;border-radius:99px;display:flex;align-items:center;gap:5px;white-space:nowrap;}
 .connected-badge::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;}
 .topbar-right{display:flex;gap:7px;align-items:center;flex-shrink:0;}
+.theme-toggle{display:flex;align-items:background:var(--card);border:1px solid var(--border2);border-radius:99px;padding:3px;gap:2px;}
 .theme-toggle{display:flex;align-items:center;background:var(--card);border:1px solid var(--border2);border-radius:99px;padding:3px;gap:2px;}
 .theme-opt{width:25px;height:25px;border-radius:99px;display:flex;align-items:center;justify-content:center;font-size:0.8rem;transition:all .2s;cursor:pointer;border:none;background:transparent;color:var(--muted);}
 .theme-opt.active{background:var(--blue);color:#fff;}
@@ -110,9 +111,6 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
 .welcome-icon .icon-fallback{font-size:3rem;display:none;}
 .welcome-icon img.img-error{display:none;}
 .welcome-icon img.img-error ~ .icon-fallback{display:block;}
-.welcome h2{font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:700;}
-.welcome p{color:var(--muted);font-size:0.85rem;max-width:350px;line-height:1.75;}
-.welcome-accent{color:var(--blue);}
 .message{display:flex;gap:10px;animation:fadeUp .27s ease;}
 @keyframes fadeUp{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:translateY(0);}}
 .message.user{flex-direction:row-reverse;}
@@ -355,9 +353,7 @@ tr:hover td{background:rgba(21,101,192,0.055);}
             onerror="this.classList.add('img-error')"/>
           <span class="icon-fallback">📊</span>
         </div>
-        <!-- <h2>Ask anything about your <span class="welcome-accent">data</span></h2>
-        <p>Select a database and ask questions in plain English. I'll write the SQL, run it, and visualise the results.</p>
-      </div> -->
+      </div>
     </div>
 
     <div class="input-bar">
@@ -672,7 +668,6 @@ async function processQueue(){
   if(isLoading||questionQueue.length===0)return;
   isLoading=true;
   const question=questionQueue.shift(),typingEl=appendTyping();
-  document.getElementById("welcome").style.display="none";
   try{
     const r=await fetch("/api/query",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,database:selectedDb,history})});
     const data=await r.json();
@@ -686,21 +681,14 @@ async function processQueue(){
 }
 
 function clearChatArea(){
-  document.getElementById("chat-area").innerHTML = `
-    <div class="welcome" id="welcome">
-      <div class="welcome-icon">
-        <img src="/icon_2.png" alt="Techwish AI" onerror="this.classList.add('img-error')"/>
-        <span class="icon-fallback">📊</span>
-      </div>
-    </div>
-  `;
-  history = [];
+  document.getElementById("chat-area").innerHTML='<div class="welcome" id="welcome"><div class="welcome-icon"><img src="./icon_2.png" alt="Techwish AI" onerror="this.classList.add(\'img-error\')"/><span class="icon-fallback">📊</span></div></div>';
+  history=[];
 }
 function clearChat(){clearChatArea();questionQueue=[];}
 
 function appendUserBubble(text){
   const area=document.getElementById("chat-area");
-  document.getElementById("welcome").style.display="none";
+  const icon=document.getElementById("welcome");if(icon)icon.style.display="none";
   const d=document.createElement("div");d.className="message user";
   d.innerHTML=`<div class="avatar user">U</div><div class="bubble"><div class="bubble-text">${escHtml(text)}</div></div>`;
   area.appendChild(d);scrollBottom();
@@ -823,8 +811,6 @@ function renderPlotly(cid,chartType,rows,columns,chartX,chartY,color,title,xAxis
   let yCol=resolveCol(chartY)||numCols.find(k=>k!==xCol)||colKeys[1];
   const xVals=rows.map(r=>{
   const v=r[xCol];
-  // Convert to string if numeric-looking (years, IDs, integer labels)
-  // This forces Plotly to treat X as categorical, not a continuous axis
   if(typeof v==="number"||(!isNaN(Number(v))&&String(v).trim()!==""&&!String(v).includes("."))){
     return String(v);
   }
@@ -890,30 +876,18 @@ function openScheduleModal(){
 
 function closeScheduleModal(){
   document.getElementById("sched-modal").classList.remove("open");
-  // Clear . fields
   const name=document.getElementById("sched-name");if(name)name.value="";
   const emails=document.getElementById("sched-emails");if(emails)emails.value="";
-  // Reset prefill state
   prefillSql="";prefillChartType="none";prefillChartX="";prefillChartY="";
   prefillChartColor=DEFAULT_CHART_COLOR;prefillChartTitle="";
-  // Reset to NL mode — this also clears the dynamic panel
   setSchedMode("nl");
 }
 
-/**
- * setSchedMode — destroys and rebuilds the dynamic input panel.
- * Only ONE textarea ever exists in the DOM at a time.
- */
 function setSchedMode(mode){
   schedMode=mode;
-
-  // Update button active states
   document.getElementById("mode-btn-nl").classList.toggle("active", mode==="nl");
   document.getElementById("mode-btn-sql").classList.toggle("active", mode==="sql");
-
-  // Replace panel contents entirely — no hidden elements
   const panel=document.getElementById("sched-dynamic-panel");
-
   if(mode==="nl"){
     panel.innerHTML=`<div class="form-group">
       <label class="form-label">Question(s)</label>
@@ -931,7 +905,6 @@ function setSchedMode(mode){
         placeholder="SELECT column1, column2&#10;FROM your_table&#10;WHERE condition&#10;LIMIT 100"
         style="font-family:'Courier New',monospace;font-size:0.77rem;"></textarea>
     </div>`;
-    // Pre-fill SQL if coming from "Schedule This" button in chat
     if(prefillSql){
       const el=document.getElementById("sched-sql");
       if(el) el.value=prefillSql;
@@ -939,10 +912,6 @@ function setSchedMode(mode){
   }
 }
 
-/**
- * openScheduleFromMsg — called from "Schedule This" button in chat.
- * Pre-fills SQL and switches to SQL mode.
- */
 function openScheduleFromMsg(sql,chartType,chartX,chartY,chartColor,chartTitle){
   prefillSql=sql;
   prefillChartType=chartType;
@@ -951,14 +920,9 @@ function openScheduleFromMsg(sql,chartType,chartX,chartY,chartColor,chartTitle){
   prefillChartColor=chartColor||DEFAULT_CHART_COLOR;
   prefillChartTitle=chartTitle;
   openScheduleModal();
-  setSchedMode("sql"); // injects SQL panel and pre-fills it
+  setSchedMode("sql");
 }
 
-/**
- * submitSchedule — reads only the currently active panel's textarea.
- * SQL mode → single schedule with raw SQL.
- * NL mode  → one schedule per question (split by newline).
- */
 async function submitSchedule(){
   const name=document.getElementById("sched-name").value.trim();
   const emails=document.getElementById("sched-emails").value.trim();
@@ -968,7 +932,6 @@ async function submitSchedule(){
   if(!emails){showToast("Please enter recipient email(s)","error");return;}
   if(!selectedDb){showToast("Please select a database first","error");return;}
 
-  // ── SQL MODE ──
   if(schedMode==="sql"){
     const sqlEl=document.getElementById("sched-sql");
     const sql=sqlEl?sqlEl.value.trim():"";
@@ -991,7 +954,6 @@ async function submitSchedule(){
     return;
   }
 
-  // ── NL MODE (one or many questions) ──
   const questionEl=document.getElementById("sched-question");
   const rawQuestion=questionEl?questionEl.value.trim():"";
   if(!rawQuestion){showToast("Please enter at least one question","error");return;}
