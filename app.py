@@ -1122,6 +1122,7 @@ def api_query():
     result.pop("_reuse_df", None)
     return jsonify(result)
 
+# ── FIXED: relaxed validation — sql OR question must be present ──
 @app.route("/api/schedules", methods=["GET"])
 def api_schedules_get():
     return jsonify({"schedules": get_scheduled_reports()})
@@ -1129,9 +1130,13 @@ def api_schedules_get():
 @app.route("/api/schedules", methods=["POST"])
 def api_schedules_post():
     data = request.json or {}
-    required = ["name","sql","database","interval_minutes","recipients"]
+
+    # Relaxed validation: sql OR question must be present (not both required)
+    required = ["name","database","interval_minutes","recipients"]
     for f in required:
         if not data.get(f): return jsonify({"error":f"Missing: {f}"}),400
+    if not data.get("sql","").strip() and not data.get("question","").strip():
+        return jsonify({"error":"Missing: sql or question"}),400
 
     question = data.get("question","")
     sql = data.get("sql","").strip()
