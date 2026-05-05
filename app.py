@@ -1,25 +1,19 @@
 """
-Techwish AI Analytics — Flask Backend (FULLY FIXED)
-====================================================
-Fixes applied:
-  1. SQL validation uses subquery wrap → no double-LIMIT crash
-  2. recipients normalised to list in send_scheduled_email (string vs list bug)
-  3. run_query_direct omits role kwarg entirely when SNOWFLAKE_ROLE is empty
-  4. Empty-SQL guard returns explicit 400 before saving schedule
-  5. Consecutive-failure counter deactivates broken schedules after 3 failures
-  6. _run_due_reports full traceback logging + status update on every crash
-  7. SMTP test endpoint at /api/test-email
-  8. Scheduler loop logs SQL before running
-  9. [RENDER FIX] PORT read from environment variable
- 10. [RENDER FIX] Removed browser auto-open (not applicable on server)
- 11. [RENDER FIX] Keep-alive ping every 14 min to prevent free-tier sleep
+Techwish AI Analytics — Flask Backend
+======================================
+Changes in this version:
+  1. SMTP replaced with SendGrid API for reliable email delivery on Render
+  2. Charts are now rendered to PNG and attached as files (not just inline CID)
+     so they appear correctly in Gmail, Outlook, Apple Mail, etc.
+  3. Chart PNG is BOTH attached AND embedded inline (best compatibility)
+  4. SendGrid API key read from SENDGRID_API_KEY in .env / environment
+  5. All other fixes from the previous version are retained
 
 Run:  python app.py
-Opens browser at http://localhost:5000 automatically.
 """
 
 import os, sys, json, re as _re, uuid, datetime, threading, time, io, base64
-import pathlib, smtplib, traceback, signal
+import pathlib, traceback, signal
 import urllib.request
 from email import encoders
 from email.mime.base import MIMEBase
@@ -35,7 +29,20 @@ import seaborn as sns
 from groq import Groq
 import plotly.express as px
 
-from flask import Flask, request, jsonify, send_from_directory, Response
+# ── SendGrid ──────────────────────────────────────────────────────
+try:
+    import sendgrid
+    from sendgrid import SendGridAPIClient
+    from sendgrid.helpers.mail import (
+        Mail, Attachment, FileContent, FileName,
+        FileType, Disposition, ContentId, To,
+    )
+    HAS_SENDGRID = True
+except ImportError:
+    HAS_SENDGRID = False
+    print("[WARNING] sendgrid package not installed. Run: pip install sendgrid")
+
+from flask import Flask, request, jsonify, send_from_directory
 
 # ─────────────────────────────────────────────────────────────────
 #  CONFIG
@@ -70,10 +77,11 @@ SNOWFLAKE_PASSWORD  = cfg("SNOWFLAKE_PASSWORD").strip()
 SNOWFLAKE_WAREHOUSE = cfg("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH").strip()
 SNOWFLAKE_ROLE      = cfg("SNOWFLAKE_ROLE", "").strip()
 GROQ_API_KEY        = cfg("GROQ_API_KEY").strip()
-SMTP_HOST           = cfg("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT           = int(cfg("SMTP_PORT", "587"))
-SMTP_USER           = cfg("SMTP_USER", "")
-SMTP_PASSWORD       = cfg("SMTP_PASSWORD", "")
+
+# ── SendGrid config ───────────────────────────────────────────────
+SENDGRID_API_KEY    = cfg("SENDGRID_API_KEY", "").strip()
+SENDGRID_FROM_EMAIL = cfg("SENDGRID_FROM_EMAIL", cfg("SMTP_USER", "")).strip()
+SENDGRID_FROM_NAME  = cfg("SENDGRID_FROM_NAME", "Techwish AI Analytics").strip()
 
 GROQ_MODEL = "llama-3.1-8b-instant"
 
@@ -92,7 +100,6 @@ _conn_lock = threading.Lock()
 _sf_conn   = None
 
 def _sf_connect_kwargs(database: str = None) -> dict:
-    """Build Snowflake connect kwargs — omits role when empty (FIX 3)."""
     kw = dict(
         account=SNOWFLAKE_ACCOUNT,
         user=SNOWFLAKE_USER,
@@ -104,7 +111,6 @@ def _sf_connect_kwargs(database: str = None) -> dict:
     )
     if database:
         kw["database"] = database
-    # FIX 3: only pass role when it actually has a value — passing None crashes connector
     if SNOWFLAKE_ROLE:
         kw["role"] = SNOWFLAKE_ROLE
     return kw
@@ -144,15 +150,9 @@ def run_query(sql: str, database: str) -> pd.DataFrame:
         raise
 
 def run_query_direct(sql: str, database: str) -> pd.DataFrame:
-    """
-    One-shot connection for scheduler / validation.
-    FIX 3: role kwarg omitted when empty.
-    """
     sql = sql.strip().rstrip(";").strip()
     if not sql:
         raise ValueError("SQL is empty — cannot execute query.")
-
-    # FIX 3: build kwargs without role=None
     kw = dict(
         account=SNOWFLAKE_ACCOUNT,
         user=SNOWFLAKE_USER,
@@ -164,7 +164,6 @@ def run_query_direct(sql: str, database: str) -> pd.DataFrame:
     )
     if SNOWFLAKE_ROLE:
         kw["role"] = SNOWFLAKE_ROLE
-
     conn = snowflake.connector.connect(**kw)
     try:
         cur = conn.cursor()
@@ -579,51 +578,34 @@ def nl_to_sql(question: str, history: list, database: str) -> dict:
     system_prompt = f"""You are a Snowflake SQL expert. Your job is to write a single valid Snowflake SQL query.
 Strict Constraints:
 
-Grouping Symmetry: Every non-aggregated expression in the SELECT clause MUST be identical in the GROUP BY clause. If an expression uses a function (e.g., CAST, LPAD, TRUNC), the exact same function and logic must appear in the GROUP BY or use positional referencing (e.g., GROUP BY 1).
-
-Explicit Aliasing: Always use short, descriptive aliases for tables (e.g., f for Fact, d for Dim). Every single column reference must be prefixed with its alias.
-
+Grouping Symmetry: Every non-aggregated expression in the SELECT clause MUST be identical in the GROUP BY clause.
+Explicit Aliasing: Always use short, descriptive aliases for tables. Every single column reference must be prefixed with its alias.
 Column Mapping: Ensure attributes belong to the correct table. Join Dim tables to Fact tables using primary/foreign key relationships.
+Date Integrity: For year/month extraction, use DATE_PART or EXTRACT.
+No Ambiguity: If a column name exists in multiple joined tables, you must specify the source table.
 
-Date Integrity: For year/month extraction, use DATE_PART or EXTRACT. If formatting as a string, ensure the CAST happens before the LPAD.
-
-No Ambiguity: If a column name exists in multiple joined tables, you must specify the source table to avoid "Ambiguous Identifier" errors. Alias Discipline: Always use table aliases (e.g., f for Fact, d for Dim) and prefix every column reference with the appropriate alias to avoid ambiguous identifier errors.
 ══════════════════════════════════════════════════════
-🔴 RULE 0 — MOST IMPORTANT: COPY COLUMN NAMES EXACTLY
+🔴 RULE 0 — COPY COLUMN NAMES EXACTLY
 ══════════════════════════════════════════════════════
-The EXACT SCHEMA BLOCK below lists every table and column with their TRUE casing.
+The EXACT SCHEMA BLOCK lists every table and column with their TRUE casing.
 You MUST copy every column name VERBATIM from the schema block.
-- If schema says "YEAR" → write "YEAR"  (not "year", not "Year")
-- If schema says "year" → write "year"  (not "YEAR", not "Year")
-- If schema says "Month" → write "Month" (not "MONTH", not "month")
-DO NOT GUESS OR INVENT column names. If you cannot find a column in the schema, say so.
 
 ══════════════════════════════════════════════════════
 🔴 RULE 1 — QUOTING IDENTIFIERS
 ══════════════════════════════════════════════════════
-- Wrap EVERY table name and column name in double quotes: "TABLE"."COLUMN"
-- Once you assign an alias (e.g. "DIM_DATE" AS "t2"), use ONLY the alias for that table.
-- RIGHT:  "t2"."YEAR"   (alias + quoted column from schema)
-- WRONG:  t2."year"    (unquoted alias)
-- WRONG:  "DIM_DATE"."YEAR"  (full table name after alias defined)
-- WRONG:  "t2"."year"  (wrong case — schema says YEAR not year)
+Wrap EVERY table name and column name in double quotes.
 
 ══════════════════════════════════════════════════════
 🔴 RULE 2 — JOIN KEYS
 ══════════════════════════════════════════════════════
 Use ONLY the join conditions listed in LIKELY JOIN CONDITIONS below.
-Do NOT invent join keys.
 
 ══════════════════════════════════════════════════════
-🔴 RULE 3 — TIME-SERIES QUERIES (Year / Month / Date)
+🔴 RULE 3 — TIME-SERIES QUERIES
 ══════════════════════════════════════════════════════
-- For yearly data:  GROUP BY + SELECT the exact YEAR column from DIM_DATE.
-- For monthly data: SELECT and GROUP BY BOTH year AND month columns.
-  Create a combined period column:
-  ("t2"."<YEAR_COL>" || '-' || LPAD(CAST("t2"."<MONTH_COL>" AS VARCHAR), 2, '0')) AS "period"
-  Set chart_x to "period" in your JSON response.
-- Always ORDER BY year ASC, month ASC for time-series.
-- Use "line" chart for trends, "bar" for comparisons, "donut"/"pie" for percentages.
+For yearly data: GROUP BY + SELECT the exact YEAR column from DIM_DATE.
+For monthly data: SELECT and GROUP BY BOTH year AND month columns.
+Always ORDER BY year ASC, month ASC for time-series.
 
 ══════════════════════════════════════════════════════
 🔴 RULE 4 — GROUP BY / ORDER BY INTEGRITY
@@ -646,10 +628,7 @@ OUTPUT FORMAT — RETURN ONLY THIS JSON, NOTHING ELSE:
 ══════════════════════════════════════════════════════
 {{"sql":"SELECT ...","summary":"one sentence","chart":"bar|line|pie|donut|area|scatter|histogram|funnel|treemap|none","chart_x":"column_name","chart_y":"column_name","chart_title":"title"}}
 
-Rules for JSON output:
-- No markdown, no code fences, no explanation text outside the JSON.
-- No newlines or tabs inside any JSON string value (use space instead).
-- The "sql" value must be a single-line string (no literal newlines).
+Rules: No markdown, no code fences, no explanation text outside the JSON. No newlines inside JSON string values.
 """
 
     user_msg = f"""USER QUESTION: {question}
@@ -791,64 +770,380 @@ def get_sample_questions(database: str) -> list:
             "Which products sell the most?","How many records are in the main table?"]
 
 # ─────────────────────────────────────────────────────────────────
-#  CHART → PNG BASE64 (for email embedding)
+#  CHART → PNG BYTES
+#  Renders the chart to a raw PNG using Plotly (with matplotlib fallback).
+#  Returns bytes or None.
 # ─────────────────────────────────────────────────────────────────
-def render_chart_to_png_b64(df, chart_type, chart_x, chart_y,
-                             chart_color=DEFAULT_CHART_COLOR, chart_title="") -> str:
+def render_chart_to_png(
+    df: pd.DataFrame,
+    chart_type: str,
+    chart_x: str,
+    chart_y: str,
+    chart_color: str = DEFAULT_CHART_COLOR,
+    chart_title: str = "",
+) -> bytes | None:
+    """Render chart to PNG bytes. Used for email attachments."""
     if not chart_type or chart_type == "none" or df is None or df.empty or not chart_x:
-        return ""
+        return None
+
     color = chart_color or DEFAULT_CHART_COLOR
     seq   = [color] + DEFAULT_BLUE_SEQUENCE
-    x_col = chart_x if chart_x in df.columns else df.columns[0]
-    num_c = df.select_dtypes(include="number").columns.tolist()
-    y_col = chart_y if chart_y in df.columns else (num_c[0] if num_c else None)
+
+    col_keys = list(df.columns)
+    def _resolve(name):
+        if not name: return None
+        if name in col_keys: return name
+        return next((k for k in col_keys if k.lower() == name.lower()), None)
+
+    x_col = _resolve(chart_x) or col_keys[0]
+    num_cols = [k for k in col_keys if pd.api.types.is_numeric_dtype(df[k])]
+    y_col = _resolve(chart_y) or (num_cols[0] if num_cols else None)
+
+    def _mpl_bar_fallback(x_vals, y_vals, color, title) -> bytes:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.bar([str(v) for v in x_vals], y_vals, color=color, edgecolor="none", width=0.6)
+        ax.set_facecolor("#f8f9fa"); fig.patch.set_facecolor("white")
+        ax.spines[["top","right"]].set_visible(False)
+        ax.tick_params(axis="x", rotation=45, labelsize=9)
+        if title: ax.set_title(title, fontsize=14, fontweight="bold", color=color, pad=12)
+        plt.tight_layout()
+        buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=160, bbox_inches="tight"); plt.close(fig)
+        return buf.getvalue()
+
     try:
-        if chart_type.startswith(("seaborn_","matplotlib_")):
-            sns.set_theme(style="whitegrid") if chart_type.startswith("seaborn_") else None
-            fig, ax = plt.subplots(figsize=(10,5))
-            if   chart_type == "seaborn_bar"    and y_col: sns.barplot(data=df,x=x_col,y=y_col,color=color,ax=ax)
-            elif chart_type == "seaborn_line"   and y_col: sns.lineplot(data=df,x=x_col,y=y_col,color=color,ax=ax)
-            elif chart_type == "seaborn_violin" and y_col: sns.violinplot(data=df,x=x_col,y=y_col,color=color,ax=ax)
-            elif chart_type == "seaborn_box"    and y_col: sns.boxplot(data=df,x=x_col,y=y_col,color=color,ax=ax)
-            elif chart_type == "matplotlib_bar" and y_col: ax.bar(df[x_col].astype(str),df[y_col],color=color,edgecolor="none")
-            elif chart_type == "matplotlib_line"and y_col: ax.plot(df[x_col].astype(str),df[y_col],color=color,marker="o",linewidth=2)
-            elif chart_type == "matplotlib_pie" and y_col:
-                wc=(seq*((len(df)//len(seq))+1))[:len(df)]
-                ax.pie(df[y_col],labels=df[x_col].astype(str),colors=wc,autopct="%1.1f%%",startangle=140)
-            elif chart_type == "matplotlib_hist": ax.hist(df[x_col].dropna(),color=color,edgecolor="none",bins=20)
-            else: plt.close(fig); return ""
-            if chart_title: ax.set_title(chart_title,fontsize=14,fontweight="bold",color=color,pad=10)
-            plt.tight_layout()
-            buf = io.BytesIO(); fig.savefig(buf,format="png",dpi=150,bbox_inches="tight"); plt.close(fig)
-            return base64.b64encode(buf.getvalue()).decode()
+        # ── Try Plotly (best quality) ──────────────────────────────
         df2 = df.copy()
-        if pd.api.types.is_numeric_dtype(df2[x_col]): df2[x_col] = df2[x_col].astype(str)
+        if pd.api.types.is_numeric_dtype(df2[x_col]):
+            df2[x_col] = df2[x_col].astype(str)
         kw = {"title": chart_title} if chart_title else {}
+
         cmap = {
-            "bar":       lambda: px.bar(df2,x=x_col,y=y_col,color_discrete_sequence=[color],**kw),
-            "line":      lambda: px.line(df2,x=x_col,y=y_col,markers=True,color_discrete_sequence=[color],**kw),
-            "area":      lambda: px.area(df2,x=x_col,y=y_col,color_discrete_sequence=[color],**kw),
-            "scatter":   lambda: px.scatter(df2,x=x_col,y=y_col,color_discrete_sequence=[color],**kw),
-            "pie":       lambda: px.pie(df2,names=x_col,values=y_col,color_discrete_sequence=seq,**kw),
-            "donut":     lambda: px.pie(df2,names=x_col,values=y_col,hole=0.45,color_discrete_sequence=seq,**kw),
-            "histogram": lambda: px.histogram(df2,x=x_col,color_discrete_sequence=[color],**kw),
-            "funnel":    lambda: px.funnel(df2,x=y_col,y=x_col,color_discrete_sequence=[color],**kw),
-            "treemap":   lambda: px.treemap(df2,path=[x_col],values=y_col,color_discrete_sequence=seq,**kw),
+            "bar":       lambda: px.bar(df2, x=x_col, y=y_col, color_discrete_sequence=[color], **kw),
+            "line":      lambda: px.line(df2, x=x_col, y=y_col, markers=True, color_discrete_sequence=[color], **kw),
+            "area":      lambda: px.area(df2, x=x_col, y=y_col, color_discrete_sequence=[color], **kw),
+            "scatter":   lambda: px.scatter(df2, x=x_col, y=y_col, color_discrete_sequence=[color], **kw),
+            "pie":       lambda: px.pie(df2, names=x_col, values=y_col, color_discrete_sequence=seq, **kw),
+            "donut":     lambda: px.pie(df2, names=x_col, values=y_col, hole=0.45, color_discrete_sequence=seq, **kw),
+            "histogram": lambda: px.histogram(df2, x=x_col, color_discrete_sequence=[color], **kw),
+            "funnel":    lambda: px.funnel(df2, x=y_col, y=x_col, color_discrete_sequence=[color], **kw),
+            "treemap":   lambda: px.treemap(df2, path=[x_col], values=y_col, color_discrete_sequence=seq, **kw),
         }
         fig = cmap.get(chart_type, cmap["bar"])()
-        fig.update_layout(paper_bgcolor="white",plot_bgcolor="white",margin=dict(t=60,b=40,l=40,r=40))
+        fig.update_layout(
+            paper_bgcolor="white", plot_bgcolor="white",
+            font=dict(family="Arial, sans-serif", size=12),
+            margin=dict(t=70, b=60, l=60, r=40),
+            title=dict(font=dict(size=16, color=color)) if chart_title else {},
+        )
         try:
-            png = fig.to_image(format="png",width=900,height=450,scale=2)
-            return base64.b64encode(png).decode()
+            return fig.to_image(format="png", width=1200, height=600, scale=2)
         except Exception:
-            fig2,ax2 = plt.subplots(figsize=(10,5))
-            if y_col and y_col in df2.columns:
-                ax2.bar(df2[x_col].astype(str),df2[y_col],color=color,edgecolor="none")
-            if chart_title: ax2.set_title(chart_title,fontsize=14,fontweight="bold",color=color)
-            plt.tight_layout(); buf=io.BytesIO(); fig2.savefig(buf,format="png",dpi=150,bbox_inches="tight"); plt.close(fig2)
-            return base64.b64encode(buf.getvalue()).decode()
+            # kaleido not installed — fall back to matplotlib
+            pass
+
     except Exception as e:
-        print(f"[chart_png] {e}"); return ""
+        print(f"[render_chart] Plotly failed: {e}")
+
+    # ── Matplotlib fallback ────────────────────────────────────────
+    try:
+        if chart_type.startswith("seaborn_"):
+            sns.set_theme(style="whitegrid")
+            fig, ax = plt.subplots(figsize=(12, 6))
+            if chart_type == "seaborn_bar" and y_col:
+                sns.barplot(data=df, x=x_col, y=y_col, color=color, ax=ax)
+            elif chart_type == "seaborn_line" and y_col:
+                sns.lineplot(data=df, x=x_col, y=y_col, color=color, ax=ax)
+            elif chart_type == "seaborn_violin" and y_col:
+                sns.violinplot(data=df, x=x_col, y=y_col, color=color, ax=ax)
+            elif chart_type == "seaborn_box" and y_col:
+                sns.boxplot(data=df, x=x_col, y=y_col, color=color, ax=ax)
+            else:
+                plt.close(fig)
+                return _mpl_bar_fallback(df[x_col], df[y_col] if y_col else df[col_keys[1]], color, chart_title)
+            if chart_title: ax.set_title(chart_title, fontsize=14, fontweight="bold", color=color, pad=10)
+            plt.tight_layout()
+            buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=160, bbox_inches="tight"); plt.close(fig)
+            return buf.getvalue()
+
+        if chart_type in ("bar","matplotlib_bar") and y_col:
+            return _mpl_bar_fallback(df[x_col], df[y_col], color, chart_title)
+
+        if chart_type in ("line","matplotlib_line") and y_col:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(df[x_col].astype(str), df[y_col], color=color, marker="o", linewidth=2.5)
+            ax.set_facecolor("#f8f9fa"); fig.patch.set_facecolor("white")
+            ax.spines[["top","right"]].set_visible(False)
+            ax.tick_params(axis="x", rotation=45, labelsize=9)
+            if chart_title: ax.set_title(chart_title, fontsize=14, fontweight="bold", color=color, pad=12)
+            plt.tight_layout()
+            buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=160, bbox_inches="tight"); plt.close(fig)
+            return buf.getvalue()
+
+        if chart_type in ("pie","matplotlib_pie","donut") and y_col:
+            wc = (seq * ((len(df) // len(seq)) + 1))[:len(df)]
+            fig, ax = plt.subplots(figsize=(9, 9))
+            wedge_props = {"width": 0.55} if chart_type == "donut" else {}
+            ax.pie(df[y_col], labels=df[x_col].astype(str), colors=wc,
+                   autopct="%1.1f%%", startangle=140, **wedge_props)
+            if chart_title: ax.set_title(chart_title, fontsize=14, fontweight="bold", color=color, pad=12)
+            plt.tight_layout()
+            buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=160, bbox_inches="tight"); plt.close(fig)
+            return buf.getvalue()
+
+    except Exception as e:
+        print(f"[render_chart] Matplotlib fallback failed: {e}")
+
+    return None
+
+
+def render_chart_to_png_b64(df, chart_type, chart_x, chart_y,
+                             chart_color=DEFAULT_CHART_COLOR, chart_title="") -> str:
+    """Wrapper that returns base64 string (kept for legacy callers)."""
+    png = render_chart_to_png(df, chart_type, chart_x, chart_y, chart_color, chart_title)
+    return base64.b64encode(png).decode() if png else ""
+
+
+# ─────────────────────────────────────────────────────────────────
+#  HTML TABLE HELPER
+# ─────────────────────────────────────────────────────────────────
+def df_to_html_table(df: pd.DataFrame, max_rows: int = 50) -> str:
+    prev = df.head(max_rows)
+    hdr  = "".join(
+        f'<th style="background:#1565C0;color:#fff;padding:8px 12px;text-align:left;'
+        f'font-family:Arial,sans-serif;font-size:13px;">{c}</th>'
+        for c in prev.columns
+    )
+    body = ""
+    for i, (_, row) in enumerate(prev.iterrows()):
+        bg = "#f4f7fb" if i % 2 == 0 else "#ffffff"
+        cells = "".join(
+            f'<td style="padding:7px 12px;border-bottom:1px solid #e8edf3;'
+            f'font-family:Arial,sans-serif;font-size:13px;color:#333;">{v}</td>'
+            for v in row
+        )
+        body += f'<tr style="background:{bg};">{cells}</tr>'
+    note = (
+        f'<p style="color:#999;font-size:11px;margin-top:6px;font-family:Arial,sans-serif;">'
+        f'Showing {len(prev)} of {len(df)} rows. Full data in CSV attachment.</p>'
+    ) if len(df) > max_rows else ""
+    return (
+        f'<table style="border-collapse:collapse;width:100%;font-size:13px;">'
+        f'<thead><tr>{hdr}</tr></thead><tbody>{body}</tbody></table>{note}'
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+#  EMAIL — SendGrid
+# ─────────────────────────────────────────────────────────────────
+def _normalise_recipients(report: dict) -> list:
+    r = report.get("recipients", [])
+    if isinstance(r, str):
+        return [e.strip() for e in r.split(",") if e.strip()]
+    if isinstance(r, list):
+        return [e.strip() for e in r if e.strip()]
+    return []
+
+
+def send_scheduled_email(report: dict, df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Send report email via SendGrid with:
+      • HTML body with inline chart image (cid)
+      • Chart PNG as a proper file attachment
+      • CSV data attachment
+    Returns (success, error_message).
+    """
+    if not HAS_SENDGRID:
+        return False, "sendgrid package not installed. Run: pip install sendgrid"
+    if not SENDGRID_API_KEY:
+        return False, "SENDGRID_API_KEY not configured in .env"
+    if not SENDGRID_FROM_EMAIL:
+        return False, "SENDGRID_FROM_EMAIL not configured in .env"
+
+    recipients = _normalise_recipients(report)
+    if not recipients:
+        return False, "No valid recipient email addresses found."
+
+    name        = report.get("name", "Report")
+    database    = report.get("database", "")
+    question    = report.get("question", "")
+    sql         = report.get("sql", "")
+    chart_color = report.get("chart_color", DEFAULT_CHART_COLOR)
+    now_str     = datetime.datetime.now().strftime("%B %d, %Y at %I:%M %p")
+
+    # ── 1. Render chart PNG ───────────────────────────────────────
+    chart_png: bytes | None = None
+    chart_type = report.get("chart_type", "none")
+    if chart_type and chart_type != "none" and not df.empty:
+        chart_png = render_chart_to_png(
+            df,
+            chart_type,
+            report.get("chart_x", ""),
+            report.get("chart_y", ""),
+            chart_color,
+            report.get("chart_title", ""),
+        )
+
+    # ── 2. Build HTML ─────────────────────────────────────────────
+    table_html = df_to_html_table(df) if not df.empty else "<p><em>No data returned.</em></p>"
+
+    if chart_png:
+        # Inline CID image + note about attachment below
+        chart_section = """
+        <div style="margin:24px 0 8px 0;">
+          <p style="font-family:Arial,sans-serif;font-size:12px;color:#888;margin:0 0 8px 0;">
+            📊 Chart preview (also attached as <strong>chart.png</strong>):
+          </p>
+          <img src="cid:report_chart_cid"
+               alt="Chart"
+               style="max-width:100%;border-radius:8px;
+                      box-shadow:0 2px 10px rgba(0,0,0,0.15);
+                      border:1px solid #e0e0e0;display:block;"/>
+        </div>"""
+    else:
+        chart_section = ""
+
+    html_body = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"/></head>
+<body style="margin:0;padding:0;background:#f0f2f5;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" bgcolor="#f0f2f5">
+<tr><td align="center" style="padding:30px 10px;">
+<table width="640" cellpadding="0" cellspacing="0"
+       style="background:#ffffff;border-radius:12px;
+              box-shadow:0 4px 20px rgba(0,0,0,0.10);overflow:hidden;max-width:100%;">
+
+  <!-- Header -->
+  <tr><td style="background:linear-gradient(135deg,#1565C0 0%,#0D47A1 100%);
+                 padding:24px 28px;">
+    <h2 style="color:#ffffff;margin:0;font-size:20px;font-weight:700;">
+      &#128202; Techwish AI &mdash; Scheduled Report
+    </h2>
+    <p style="color:rgba(255,255,255,0.75);margin:6px 0 0;font-size:13px;">{now_str}</p>
+  </td></tr>
+
+  <!-- Meta -->
+  <tr><td style="padding:20px 28px;background:#f8faff;border-bottom:1px solid #e8edf3;">
+    <table cellpadding="0" cellspacing="0" width="100%">
+      <tr>
+        <td width="50%" style="padding:4px 0;">
+          <span style="font-size:12px;color:#888;">REPORT</span><br/>
+          <span style="font-size:14px;font-weight:600;color:#1a1a1a;">{name}</span>
+        </td>
+        <td width="50%" style="padding:4px 0;">
+          <span style="font-size:12px;color:#888;">DATABASE</span><br/>
+          <span style="font-size:14px;font-weight:600;color:#1a1a1a;">{database}</span>
+        </td>
+      </tr>
+      <tr>
+        <td colspan="2" style="padding:10px 0 4px;">
+          <span style="font-size:12px;color:#888;">QUESTION</span><br/>
+          <span style="font-size:14px;color:#333;">{question}</span>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:6px 0 0;">
+          <span style="font-size:12px;color:#888;">ROWS RETURNED</span><br/>
+          <span style="font-size:22px;font-weight:700;color:#1565C0;">{len(df):,}</span>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+
+  <!-- Chart -->
+  <tr><td style="padding:0 28px;">
+    {chart_section}
+  </td></tr>
+
+  <!-- Data Table -->
+  <tr><td style="padding:16px 28px 8px;">
+    <p style="font-size:12px;color:#888;margin:0 0 10px 0;">DATA PREVIEW</p>
+    {table_html}
+  </td></tr>
+
+  <!-- SQL Footer -->
+  <tr><td style="padding:16px 28px 24px;border-top:1px solid #e8edf3;margin-top:12px;">
+    <p style="font-size:11px;color:#aaa;margin:0 0 4px;">SQL QUERY</p>
+    <code style="font-size:11px;color:#555;background:#f5f5f5;padding:6px 10px;
+                 border-radius:5px;display:block;word-break:break-all;
+                 border-left:3px solid #1565C0;">{sql}</code>
+    <p style="font-size:11px;color:#ccc;margin:12px 0 0;text-align:center;">
+      Powered by Techwish AI Analytics
+    </p>
+  </td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>"""
+
+    text_body = (
+        f"Techwish AI Report: {name}\n"
+        f"{now_str}\n"
+        f"Question: {question}\n"
+        f"Database: {database}\n"
+        f"Rows: {len(df)}\n\n"
+        + (df.to_string(index=False) if not df.empty else "No data.")
+    )
+
+    # ── 3. Build SendGrid message ─────────────────────────────────
+    try:
+        message = Mail(
+            from_email=(SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME),
+            to_emails=[To(r) for r in recipients],
+            subject=f"📊 {name} — Techwish AI Report",
+        )
+        message.add_content(text_body, "text/plain")
+        message.add_content(html_body,  "text/html")
+
+        # ── Chart PNG: both inline (CID) + file attachment ────────
+        if chart_png:
+            b64_chart = base64.b64encode(chart_png).decode()
+
+            # File attachment (always shows in email client)
+            chart_att = Attachment(
+                file_content=FileContent(b64_chart),
+                file_name=FileName("chart.png"),
+                file_type=FileType("image/png"),
+                disposition=Disposition("attachment"),
+            )
+            message.add_attachment(chart_att)
+
+            # Inline attachment (for the <img src="cid:..."> in HTML)
+            inline_att = Attachment(
+                file_content=FileContent(b64_chart),
+                file_name=FileName("chart_inline.png"),
+                file_type=FileType("image/png"),
+                disposition=Disposition("inline"),
+                content_id=ContentId("report_chart_cid"),
+            )
+            message.add_attachment(inline_att)
+
+        # ── CSV attachment ─────────────────────────────────────────
+        if not df.empty:
+            csv_bytes = df.to_csv(index=False).encode("utf-8")
+            b64_csv   = base64.b64encode(csv_bytes).decode()
+            safe_name = _re.sub(r"[^a-zA-Z0-9_]", "_", name) + ".csv"
+            csv_att = Attachment(
+                file_content=FileContent(b64_csv),
+                file_name=FileName(safe_name),
+                file_type=FileType("text/csv"),
+                disposition=Disposition("attachment"),
+            )
+            message.add_attachment(csv_att)
+
+        # ── Send ───────────────────────────────────────────────────
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
+
+        if response.status_code in (200, 202):
+            return True, ""
+        else:
+            return False, f"SendGrid returned status {response.status_code}: {response.body}"
+
+    except Exception as e:
+        return False, f"SendGrid error: {traceback.format_exc()}"
+
 
 # ─────────────────────────────────────────────────────────────────
 #  SCHEDULER
@@ -881,7 +1176,6 @@ def save_scheduled_reports(reports: list):
 def add_scheduled_report(name, question, sql, database, interval_minutes, recipients,
                           chart_type="none", chart_x="", chart_y="",
                           chart_color=DEFAULT_CHART_COLOR, chart_title="") -> dict:
-    # Normalise recipients to list
     if isinstance(recipients, str):
         recipients = [e.strip() for e in recipients.split(",") if e.strip()]
     report = {
@@ -897,132 +1191,7 @@ def add_scheduled_report(name, question, sql, database, interval_minutes, recipi
     save_scheduled_reports(reports)
     return report
 
-def df_to_html_table(df: pd.DataFrame, max_rows: int = 50) -> str:
-    prev = df.head(max_rows)
-    hdr  = "".join(f'<th style="background:#1565C0;color:#fff;padding:8px 12px;text-align:left;">{c}</th>' for c in prev.columns)
-    body = ""
-    for i, (_, row) in enumerate(prev.iterrows()):
-        bg = "#f9f9f9" if i%2==0 else "#fff"
-        cells = "".join(f'<td style="padding:7px 12px;border-bottom:1px solid #eee;">{v}</td>' for v in row)
-        body += f'<tr style="background:{bg};">{cells}</tr>'
-    note = (f'<p style="color:gray;font-size:0.75rem;margin-top:6px;">Showing {len(prev)} of {len(df)} rows. '
-            f'Full data in CSV attachment.</p>') if len(df) > max_rows else ""
-    return (f'<table style="border-collapse:collapse;width:100%;font-size:0.85rem;">'
-            f'<thead><tr>{hdr}</tr></thead><tbody>{body}</tbody></table>{note}')
-
-def _normalise_recipients(report: dict) -> list:
-    """FIX 2: Always return a proper list regardless of how recipients was stored."""
-    r = report.get("recipients", [])
-    if isinstance(r, str):
-        return [e.strip() for e in r.split(",") if e.strip()]
-    if isinstance(r, list):
-        return [e.strip() for e in r if e.strip()]
-    return []
-
-def send_scheduled_email(report: dict, df: pd.DataFrame):
-    if not SMTP_USER or not SMTP_PASSWORD:
-        return False, "SMTP credentials not configured. Check SMTP_USER and SMTP_PASSWORD in secrets.toml."
-
-    # FIX 2: normalise recipients — can be stored as list OR comma-string
-    recipients = _normalise_recipients(report)
-    if not recipients:
-        return False, "No valid recipient email addresses found."
-
-    name     = report.get("name", "Report")
-    database = report.get("database", "")
-    question = report.get("question", "")
-    sql      = report.get("sql", "")
-    now_str  = datetime.datetime.now().strftime("%B %d, %Y at %I:%M %p")
-
-    table_html  = df_to_html_table(df) if not df.empty else "<p><em>No data returned.</em></p>"
-    chart_color = report.get("chart_color", DEFAULT_CHART_COLOR)
-
-    chart_png_b64 = render_chart_to_png_b64(
-        df, report.get("chart_type","none"),
-        report.get("chart_x",""), report.get("chart_y",""),
-        chart_color, report.get("chart_title",""))
-
-    chart_html = (
-        '<div style="margin:20px 0;"><img src="cid:report_chart" alt="Chart" '
-        'style="max-width:100%;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.12);"/></div>'
-    ) if chart_png_b64 else ""
-
-    html_body = f"""<html><body style="font-family:Arial,sans-serif;color:#333;max-width:920px;margin:0 auto;padding:20px;">
-  <div style="background:#1565C0;padding:16px 24px;border-radius:10px 10px 0 0;">
-    <h2 style="color:white;margin:0;font-size:1.3rem;">&#128202; Techwish AI &#8212; Scheduled Report</h2>
-    <p style="color:rgba(255,255,255,0.8);margin:4px 0 0;font-size:0.85rem;">{now_str}</p>
-  </div>
-  <div style="background:#f9f9f9;padding:16px 24px;border:1px solid #e0e0e0;">
-    <p><strong>Report:</strong> {name}</p>
-    <p><strong>Database:</strong> {database}</p>
-    <p><strong>Question:</strong> {question}</p>
-    <p><strong>Rows returned:</strong> {len(df)}</p>
-  </div>
-  {chart_html}
-  <div style="padding:16px 0;">{table_html}</div>
-  <div style="background:#f5f5f5;padding:12px 16px;border-radius:0 0 10px 10px;margin-top:16px;">
-    <p style="color:gray;font-size:0.78rem;margin:0;">SQL: <code style="background:#e8e8e8;padding:2px 6px;border-radius:4px;">{sql}</code></p>
-    <p style="color:gray;font-size:0.75rem;margin:4px 0 0;">Powered by Techwish AI Analytics</p>
-  </div>
-</body></html>"""
-
-    text_body = (f"Techwish AI Report: {name}\n{now_str}\nQuestion: {question}\nRows: {len(df)}\n\n"
-                 + (df.to_string(index=False) if not df.empty else "No data."))
-
-    try:
-        msg = MIMEMultipart("mixed")
-        msg["Subject"] = f"Techwish AI Report: {name}"
-        msg["From"]    = SMTP_USER
-        msg["To"]      = ", ".join(recipients)
-
-        related = MIMEMultipart("related")
-        alt     = MIMEMultipart("alternative")
-        alt.attach(MIMEText(text_body, "plain"))
-        alt.attach(MIMEText(html_body, "html"))
-        related.attach(alt)
-
-        if chart_png_b64:
-            img = MIMEBase("image","png")
-            img.set_payload(base64.b64decode(chart_png_b64))
-            encoders.encode_base64(img)
-            img.add_header("Content-ID","<report_chart>")
-            img.add_header("Content-Disposition","inline",filename="chart.png")
-            related.attach(img)
-
-        msg.attach(related)
-
-        if not df.empty:
-            csv_part = MIMEBase("application","octet-stream")
-            csv_part.set_payload(df.to_csv(index=False).encode("utf-8"))
-            encoders.encode_base64(csv_part)
-            safe = _re.sub(r"[^a-zA-Z0-9_]","_",name)+".csv"
-            csv_part.add_header("Content-Disposition",f'attachment; filename="{safe}"')
-            msg.attach(csv_part)
-
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.sendmail(SMTP_USER, recipients, msg.as_string())
-        server.quit()
-        return True, ""
-
-    except smtplib.SMTPAuthenticationError as e:
-        return False, (f"SMTP Auth failed — if using Gmail, you need an App Password "
-                       f"(not your login password). Error: {e}")
-    except smtplib.SMTPException as e:
-        return False, f"SMTP error: {e}"
-    except Exception as e:
-        return False, f"Unexpected email error: {e}"
-
 def _run_due_reports():
-    """
-    Check all active schedules and run any that are due.
-    FIX 1: SQL validation via subquery wrap
-    FIX 4: Explicit empty-SQL guard
-    FIX 5: Consecutive failure counter — deactivates after 3 failures
-    """
     reports = get_scheduled_reports()
     changed = False
 
@@ -1039,14 +1208,12 @@ def _run_due_reports():
                 if now < datetime.datetime.fromisoformat(last) + datetime.timedelta(minutes=mins):
                     continue
             except Exception:
-                pass  # bad timestamp — run it anyway
+                pass
 
         _log_sched(f"Running '{r.get('name')}' → {_normalise_recipients(r)}")
 
-        # FIX 4: Guard against empty SQL — regenerate from question
         sql = r.get("sql", "").strip()
         if not sql:
-            _log_sched(f"  SKIP: SQL is empty for '{r.get('name')}' — regenerating from question...")
             q  = r.get("question", "").strip()
             db = r.get("database", "")
             if q and db:
@@ -1055,32 +1222,24 @@ def _run_due_reports():
                     sql = gen.get("sql", "").strip()
                     if sql:
                         r["sql"] = sql
-                        _log_sched(f"  Regenerated SQL: {sql[:80]}...")
                     else:
-                        r["last_run"]    = now.isoformat()
-                        r["last_status"] = "Failed: Could not regenerate SQL from question"
-                        r["fail_count"]  = r.get("fail_count", 0) + 1
-                        if r["fail_count"] >= 3:
-                            r["active"] = False
-                            _log_sched(f"  Deactivated '{r.get('name')}' after 3 consecutive failures.")
-                        changed = True
-                        continue
+                        r["last_run"] = now.isoformat()
+                        r["last_status"] = "Failed: Could not regenerate SQL"
+                        r["fail_count"] = r.get("fail_count", 0) + 1
+                        if r["fail_count"] >= 3: r["active"] = False
+                        changed = True; continue
                 except Exception as e:
-                    r["last_run"]    = now.isoformat()
-                    r["last_status"] = f"Failed: SQL regeneration error — {e}"
-                    r["fail_count"]  = r.get("fail_count", 0) + 1
-                    if r["fail_count"] >= 3:
-                        r["active"] = False
-                    changed = True
-                    continue
+                    r["last_run"] = now.isoformat()
+                    r["last_status"] = f"Failed: SQL regen error — {e}"
+                    r["fail_count"] = r.get("fail_count", 0) + 1
+                    if r["fail_count"] >= 3: r["active"] = False
+                    changed = True; continue
             else:
-                r["last_run"]    = now.isoformat()
-                r["last_status"] = "Failed: SQL is empty and no question to regenerate from"
-                r["fail_count"]  = r.get("fail_count", 0) + 1
-                if r["fail_count"] >= 3:
-                    r["active"] = False
-                changed = True
-                continue
+                r["last_run"] = now.isoformat()
+                r["last_status"] = "Failed: SQL empty, no question to regenerate from"
+                r["fail_count"] = r.get("fail_count", 0) + 1
+                if r["fail_count"] >= 3: r["active"] = False
+                changed = True; continue
 
         _log_sched(f"  SQL: {sql[:120]}...")
 
@@ -1096,7 +1255,6 @@ def _run_due_reports():
         r["run_count"]   = r.get("run_count", 0) + 1
         changed          = True
 
-        # FIX 5: track consecutive failures
         if ok:
             r["fail_count"] = 0
             _log_sched(f"  OK: '{r.get('name')}'")
@@ -1120,13 +1278,9 @@ def _scheduler_loop():
         _sched_stop.wait(60)
     _log_sched("Scheduler thread stopped.")
 
-# ─────────────────────────────────────────────────────────────────
-#  RENDER FIX 11 — KEEP-ALIVE PING
-#  Pings /api/health every 14 minutes so Render free tier stays awake.
-# ─────────────────────────────────────────────────────────────────
 def _keep_alive_loop():
     """Ping self every 14 minutes to prevent Render free-tier sleep."""
-    _sched_stop.wait(60)          # wait 1 min after startup before first ping
+    _sched_stop.wait(60)
     while not _sched_stop.is_set():
         try:
             render_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
@@ -1139,7 +1293,7 @@ def _keep_alive_loop():
                 _log_sched(f"[keep-alive] ping OK → {render_url}/api/health")
         except Exception as e:
             _log_sched(f"[keep-alive] ping failed (non-fatal): {e}")
-        _sched_stop.wait(840)     # 14 minutes
+        _sched_stop.wait(840)
 
 # ─────────────────────────────────────────────────────────────────
 #  FLASK ROUTES
@@ -1231,13 +1385,11 @@ def api_schedules_post():
     if not sql and not question:
         return jsonify({"error": "Must provide either sql or question"}), 400
 
-    # FIX 4: Always resolve SQL from question at creation time
     if not sql and question:
         _log_sched(f"[POST /api/schedules] Generating SQL for: {question}")
         try:
             r   = nl_to_sql(question, [], data["database"])
             sql = r.get("sql","").strip()
-            _log_sched(f"[POST /api/schedules] Generated SQL: {sql[:120]}")
         except Exception as e:
             return jsonify({"error": f"SQL generation failed: {e}"}), 500
 
@@ -1246,14 +1398,11 @@ def api_schedules_post():
                 "error": "Could not generate SQL from question — please try rephrasing or use SQL mode."
             }), 400
 
-    # Strip trailing semicolons
     sql = sql.rstrip(";").strip()
 
-    # FIX 1: Validate SQL using a subquery wrap so we never break on existing LIMIT clauses
     try:
         _val_sql = f"SELECT * FROM ({sql}) __validation_row LIMIT 1"
-        test_df  = run_query_direct(_val_sql, data["database"])
-        _log_sched(f"[POST /api/schedules] SQL validated OK ({len(test_df)} row test)")
+        run_query_direct(_val_sql, data["database"])
     except Exception as e:
         return jsonify({"error": f"SQL validation failed: {e}"}), 400
 
@@ -1263,14 +1412,13 @@ def api_schedules_post():
         sql=sql,
         database=data["database"],
         interval_minutes=int(data["interval_minutes"]),
-        recipients=data["recipients"],   # normalised inside add_scheduled_report
+        recipients=data["recipients"],
         chart_type=data.get("chart_type","none"),
         chart_x=data.get("chart_x",""),
         chart_y=data.get("chart_y",""),
         chart_color=data.get("chart_color", DEFAULT_CHART_COLOR),
         chart_title=data.get("chart_title",""),
     )
-    _log_sched(f"[POST /api/schedules] Created '{report['name']}' id={report['id']}")
     return jsonify({"success": True, "report": report})
 
 @app.route("/api/schedules/<report_id>", methods=["DELETE"])
@@ -1285,7 +1433,7 @@ def api_schedule_toggle(report_id):
     for r in reports:
         if r["id"] == report_id:
             r["active"]     = not r.get("active", True)
-            r["fail_count"] = 0   # reset failure counter on manual toggle
+            r["fail_count"] = 0
     save_scheduled_reports(reports)
     return jsonify({"success": True})
 
@@ -1298,7 +1446,6 @@ def api_schedule_run(report_id):
 
     sql = report.get("sql","").strip()
 
-    # FIX 4: Regenerate SQL if empty before running
     if not sql:
         q  = report.get("question","").strip()
         db = report.get("database","")
@@ -1315,9 +1462,7 @@ def api_schedule_run(report_id):
             except Exception as e:
                 return jsonify({"error": f"SQL regeneration failed: {e}"}), 500
         if not sql:
-            return jsonify({
-                "error": "SQL is empty and could not be regenerated. Please delete and re-create this schedule."
-            }), 400
+            return jsonify({"error": "SQL is empty and could not be regenerated."}), 400
 
     try:
         df      = run_query_direct(sql, report["database"])
@@ -1340,25 +1485,25 @@ def api_schedule_run(report_id):
 
 @app.route("/api/test-email")
 def api_test_email():
-    """Visit http://localhost:5000/api/test-email to verify SMTP credentials."""
-    if not SMTP_USER or not SMTP_PASSWORD:
-        return jsonify({"success": False,
-                        "error": "SMTP_USER or SMTP_PASSWORD not configured in secrets.toml"}), 400
+    """GET /api/test-email — sends a test email to SENDGRID_FROM_EMAIL."""
+    if not HAS_SENDGRID:
+        return jsonify({"success": False, "error": "sendgrid not installed"}), 400
+    if not SENDGRID_API_KEY:
+        return jsonify({"success": False, "error": "SENDGRID_API_KEY not set"}), 400
+    if not SENDGRID_FROM_EMAIL:
+        return jsonify({"success": False, "error": "SENDGRID_FROM_EMAIL not set"}), 400
     try:
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        test_msg = (f"Subject: Techwish SMTP Test\nFrom: {SMTP_USER}\nTo: {SMTP_USER}\n\n"
-                    "SMTP is working correctly!")
-        server.sendmail(SMTP_USER, [SMTP_USER], test_msg)
-        server.quit()
-        return jsonify({"success": True,
-                        "message": f"Test email sent to {SMTP_USER}. Check your inbox."})
-    except smtplib.SMTPAuthenticationError as e:
-        return jsonify({"success": False,
-                        "error": f"Auth failed — Gmail requires an App Password, not your login password. {e}"}), 400
+        message = Mail(
+            from_email=(SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME),
+            to_emails=SENDGRID_FROM_EMAIL,
+            subject="Techwish AI — SMTP Test",
+            plain_text_content="SendGrid is configured correctly. This is a test email from Techwish AI Analytics.",
+        )
+        sg  = SendGridAPIClient(SENDGRID_API_KEY)
+        res = sg.send(message)
+        if res.status_code in (200, 202):
+            return jsonify({"success": True, "message": f"Test email sent to {SENDGRID_FROM_EMAIL}"})
+        return jsonify({"success": False, "error": f"Status {res.status_code}: {res.body}"}), 400
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -1367,31 +1512,28 @@ def api_health():
     return jsonify({
         "status": "ok",
         "scheduler": "running",
-        "smtp_configured": bool(SMTP_USER and SMTP_PASSWORD),
+        "sendgrid_configured": bool(SENDGRID_API_KEY and SENDGRID_FROM_EMAIL),
     })
 
 # ─────────────────────────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Start scheduler thread
     sched_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
     sched_thread.start()
 
-    # RENDER FIX 11: Start keep-alive thread
     keepalive_thread = threading.Thread(target=_keep_alive_loop, daemon=True, name="keepalive")
     keepalive_thread.start()
 
-    # RENDER FIX 9 + 10: Read PORT from environment (Render sets this automatically).
-    # Browser auto-open removed — not applicable on a remote server.
     port = int(os.environ.get("PORT", 5000))
 
     print("\n" + "="*60)
-    print("  Techwish AI Analytics — FULLY FIXED")
+    print("  Techwish AI Analytics")
     print(f"  http://0.0.0.0:{port}")
     print("  Scheduler  : running (background thread)")
     print("  Keep-alive : running (background thread)")
-    print(f"  SMTP       : {SMTP_USER or '(NOT CONFIGURED)'}")
+    print(f"  SendGrid   : {'configured ✅' if SENDGRID_API_KEY else 'NOT CONFIGURED ❌'}")
+    print(f"  From email : {SENDGRID_FROM_EMAIL or '(not set)'}")
     print(f"  Test email : http://localhost:{port}/api/test-email")
     print(f"  Health     : http://localhost:{port}/api/health")
     print("="*60 + "\n")
