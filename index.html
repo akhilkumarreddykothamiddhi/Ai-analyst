@@ -685,14 +685,13 @@ async function processQueue(){
   if(questionQueue.length>0){appendUserBubble(questionQueue[0]);setTimeout(processQueue,300);}
 }
 
-function clearChatArea() {
-  document.getElementById("messages").innerHTML = `
+function clearChatArea(){
+  document.getElementById("chat-area").innerHTML = `
     <div class="welcome" id="welcome">
       <div class="welcome-icon">
         <img src="/icon_2.png" alt="Techwish AI" onerror="this.classList.add('img-error')"/>
         <span class="icon-fallback">📊</span>
       </div>
-      <span class="welcome-accent"></span>
     </div>
   `;
   history = [];
