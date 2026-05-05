@@ -355,9 +355,9 @@ tr:hover td{background:rgba(21,101,192,0.055);}
             onerror="this.classList.add('img-error')"/>
           <span class="icon-fallback">📊</span>
         </div>
-        <h2>Ask anything about your <span class="welcome-accent">data</span></h2>
+        <!-- <h2>Ask anything about your <span class="welcome-accent">data</span></h2>
         <p>Select a database and ask questions in plain English. I'll write the SQL, run it, and visualise the results.</p>
-      </div>
+      </div> -->
     </div>
 
     <div class="input-bar">
@@ -686,7 +686,7 @@ async function processQueue(){
 }
 
 function clearChatArea(){
-  document.getElementById("chat-area").innerHTML='<div class="welcome" id="welcome"><div class="welcome-icon"><img src="./icon_2.png" alt="Techwish AI" onerror="this.classList.add(\'img-error\')"/><span class="icon-fallback">📊</span></div><h2>Ask anything about your <span class="welcome-accent">data</span></h2><p>Select a database and start asking questions in plain English.</p></div>';
+  document.getElementById("chat-area").innerHTML='<div class="welcome" id="welcome"><div class="welcome-icon"><img src="./icon_2.png" alt="Techwish AI" onerror="this.classList.add(\'img-error\')"/><span class="icon-fallback">📊</span></div>';
   history=[];
 }
 function clearChat(){clearChatArea();questionQueue=[];}
