@@ -215,7 +215,6 @@ tr:hover td{background:rgba(21,101,192,0.055);}
 .nl-hint{font-size:0.71rem;color:var(--muted);margin-top:5px;line-height:1.6;padding:7px 10px;background:rgba(21,101,192,0.06);border:1px solid rgba(21,101,192,0.15);border-radius:6px;}
 .nl-hint strong{color:#42A5F5;}
 
-/* FIX: validation hint box shown when SQL is generating */
 .sql-gen-status{font-size:0.72rem;padding:7px 10px;border-radius:6px;margin-top:5px;display:none;}
 .sql-gen-status.loading{display:block;background:rgba(21,101,192,0.07);border:1px solid rgba(21,101,192,0.2);color:#42A5F5;}
 .sql-gen-status.ok{display:block;background:rgba(76,175,80,0.07);border:1px solid rgba(76,175,80,0.2);color:var(--green);}
@@ -239,12 +238,9 @@ tr:hover td{background:rgba(21,101,192,0.055);}
 .sched-btn.danger:hover{border-color:#EF5350;color:#EF5350;}
 .sched-btn.run:hover{border-color:var(--green);color:var(--green);}
 
-/* ── EMAIL CHART MODAL ── */
-.email-modal .modal{width:420px;}
-
 /* toast */
 .toast-container{position:fixed;bottom:82px;right:19px;z-index:999;display:flex;flex-direction:column;gap:6px;}
-.toast{background:var(--surface);border:1px solid var(--border2);border-radius:9px;padding:10px 13px;font-size:0.79rem;color:var(--text);box-shadow:var(--shadow);display:flex;align-items:center;gap:6px;animation:slideIn .22s ease,fadeOut .4s ease 2.6s forwards;min-width:215px;}
+.toast{background:var(--surface);border:1px solid var(--border2);border-radius:9px;padding:10px 13px;font-size:0.79rem;color:var(--text);box-shadow:var(--shadow);display:flex;align-items:center;gap:6px;animation:slideIn .22s ease,fadeOut .4s ease 2.6s forwards;min-width:215px;max-width:380px;word-break:break-word;}
 @keyframes slideIn{from{opacity:0;transform:translateX(17px);}to{opacity:1;transform:translateX(0);}}
 @keyframes fadeOut{from{opacity:1;}to{opacity:0;pointer-events:none;}}
 .toast.success{border-color:rgba(76,175,80,.32);}
@@ -381,7 +377,6 @@ tr:hover td{background:rgba(21,101,192,0.055);}
       </div>
     </div>
 
-    <!-- Dynamic panel -->
     <div id="sched-dynamic-panel"></div>
 
     <div class="form-group">
@@ -544,17 +539,22 @@ function closeEmailChartModal(){
 async function submitEmailChart(){
   const cid=_emailChartCid;
   if(!cid){showToast("No chart selected","error");return;}
-  const recipients=document.getElementById("email-chart-recipients").value.trim();
-  if(!recipients){showToast("Please enter recipient email(s)","error");return;}
+
+  const recipientsRaw=document.getElementById("email-chart-recipients").value.trim();
+  if(!recipientsRaw){showToast("Please enter recipient email(s)","error");return;}
+
+  // FIX 2: validate emails client-side before sending
+  const recipients=recipientsRaw.split(",").map(e=>e.trim()).filter(Boolean);
+  if(!recipients.length){showToast("Please enter at least one valid email","error");return;}
+
   const subject=document.getElementById("email-chart-subject").value.trim()||"Techwish AI — Chart Report";
   const note=document.getElementById("email-chart-note").value.trim();
-
   const data=window._chartData?.[cid];
   if(!data){showToast("Chart data not found","error");return;}
 
   const sql=(data.sql||"").trim();
   const question=(data.question||subject||"Chart export").trim();
-  if(!sql && !question){showToast("No SQL or question found for this chart","error");return;}
+  if(!sql&&!question){showToast("No SQL or question found for this chart","error");return;}
 
   const chartType=document.getElementById("type-"+cid)?.value||"bar";
   const color=document.getElementById("color-"+cid)?.value||DEFAULT_CHART_COLOR;
@@ -564,38 +564,59 @@ async function submitEmailChart(){
   btn.textContent="⏳ Sending…";btn.disabled=true;
 
   try{
+    // FIX 2: send recipients as comma-joined string — backend normalises to list
     const payload={
-      name:subject, recipients:recipients, interval_minutes:99999,
-      database:selectedDb||"", sql:sql, question:question,
-      chart_type:chartType, chart_x:data.chart_x||"", chart_y:data.chart_y||"",
-      chart_color:color, chart_title:title, note:note, one_time:true,
+      name:subject,
+      recipients:recipients.join(", "),   // single string — backend splits it
+      interval_minutes:99999,
+      database:selectedDb||"",
+      sql:sql,
+      question:question,
+      chart_type:chartType,
+      chart_x:data.chart_x||"",
+      chart_y:data.chart_y||"",
+      chart_color:color,
+      chart_title:title,
+      note:note,
+      one_time:true,
     };
 
+    // Create a one-time schedule
     let cr,cd;
     try{
       cr=await fetch("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
       const raw=await cr.text();
       try{cd=JSON.parse(raw);}
-      catch(e){showToast("Server error: "+raw.slice(0,80),"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
+      catch(e){
+        showToast("Server error: "+raw.slice(0,120),"error");
+        btn.textContent="📤 Send Email";btn.disabled=false;return;
+      }
     }catch(e){showToast("Network error: "+e.message,"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
 
-    if(!cd.success){showToast("Failed: "+(cd.error||"unknown"),"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
+    if(!cd.success){
+      // FIX: surface the actual error message from the server
+      showToast("Failed: "+(cd.error||"Unknown server error"),"error");
+      btn.textContent="📤 Send Email";btn.disabled=false;return;
+    }
 
     const rid=cd.report?.id;
     if(!rid){showToast("No report ID returned","error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
 
+    // Run the report immediately
     let rr,rd;
     try{
       rr=await fetch(`/api/schedules/${rid}/run`,{method:"POST"});
       const raw2=await rr.text();
       try{rd=JSON.parse(raw2);}
-      catch(e){showToast("Send error: "+raw2.slice(0,80),"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
+      catch(e){showToast("Send error: "+raw2.slice(0,120),"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
     }catch(e){showToast("Network error on send: "+e.message,"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
 
     if(rd.success){
       showToast("✅ Chart emailed successfully!","success");
+      // Clean up the one-time schedule
       await fetch(`/api/schedules/${rid}`,{method:"DELETE"});
-      closeEmailChartModal();loadSchedules();
+      closeEmailChartModal();
+      loadSchedules();
     }else{
       showToast("Email failed: "+(rd.error||"unknown"),"error");
     }
@@ -892,7 +913,6 @@ function openScheduleFromMsg(sql,chartType,chartX,chartY,chartColor,chartTitle){
   setSchedMode("sql");
 }
 
-// FIX ❶ (frontend): submitSchedule now shows a loading state and handles errors per-question with clear messages
 async function submitSchedule(){
   const name=document.getElementById("sched-name").value.trim();
   const emails=document.getElementById("sched-emails").value.trim();
@@ -923,15 +943,15 @@ async function submitSchedule(){
       const r=await fetch("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
       const raw=await r.text();
       let d;
-      try{d=JSON.parse(raw);}catch(e){showToast("Server error: "+raw.slice(0,60),"error");btn.textContent="➕ Add Schedule";btn.disabled=false;return;}
+      try{d=JSON.parse(raw);}catch(e){showToast("Server error: "+raw.slice(0,80),"error");btn.textContent="➕ Add Schedule";btn.disabled=false;return;}
       if(d.success){showToast("✅ Schedule added!","success");closeScheduleModal();loadSchedules();}
-      else showToast("Error: "+(d.error||"unknown"),"error");
-    }catch(e){showToast("Network error","error");}
+      else showToast("Error: "+(d.error||"Unknown error"),"error");
+    }catch(e){showToast("Network error: "+e.message,"error");}
     btn.textContent="➕ Add Schedule";btn.disabled=false;
     return;
   }
 
-  // NL mode
+  // NL mode — multi-question support
   const questionEl=document.getElementById("sched-question");
   const rawQuestion=questionEl?questionEl.value.trim():"";
   if(!rawQuestion){showToast("Please enter at least one question","error");btn.disabled=false;return;}
@@ -940,7 +960,6 @@ async function submitSchedule(){
   if(questions.length===0){showToast("Please enter at least one question","error");btn.disabled=false;return;}
 
   const statusEl=document.getElementById("nl-sql-status");
-
   if(questions.length>1) showToast(`⏳ Adding ${questions.length} schedules…`,"");
 
   let created=0;
@@ -977,7 +996,8 @@ async function submitSchedule(){
       }
     }catch(e){failed.push({q,reason:"Network error: "+e.message});}
 
-    if(i<questions.length-1) await new Promise(res=>setTimeout(res,2000));
+    // Small delay between NL questions to avoid Groq rate limits
+    if(i<questions.length-1) await new Promise(res=>setTimeout(res,2500));
   }
 
   btn.textContent="➕ Add Schedule";btn.disabled=false;
@@ -1006,10 +1026,11 @@ async function loadSchedules(){
       </div>
       <div class="sched-meta">
         <span>⏱ Every ${s.interval_minutes}min</span>
-        <span>📧 ${escHtml((s.recipients||[]).join(", "))}</span>
+        <span>📧 ${escHtml((Array.isArray(s.recipients)?s.recipients:[s.recipients]).join(", "))}</span>
         ${s.last_status?`<span>${s.last_status.startsWith("Sent")?"✅":"❌"} ${s.last_run?new Date(s.last_run).toLocaleString():""}</span>`:""}
       </div>
-      ${s.last_status&&s.last_status.startsWith("Failed")?`<div style="font-size:0.67rem;color:#EF5350;margin-bottom:6px;word-break:break-word;">⚠ ${escHtml(s.last_status)}</div>`:""}
+      ${s.fail_count>=3&&!s.active?`<div style="font-size:0.67rem;color:#EF5350;margin-bottom:6px;">⛔ Deactivated after 3 failures — fix and resume</div>`:""}
+      ${s.last_status&&!s.last_status.startsWith("Sent")?`<div style="font-size:0.67rem;color:#EF5350;margin-bottom:6px;word-break:break-word;">⚠ ${escHtml(s.last_status)}</div>`:""}
       <div class="sched-actions">
         <button class="sched-btn run" onclick="runSchedule('${s.id}')">▶ Run Now</button>
         <button class="sched-btn" onclick="toggleSchedule('${s.id}')">${s.active?"⏸ Pause":"▶ Resume"}</button>
@@ -1025,13 +1046,16 @@ async function runSchedule(id){
     const r=await fetch(`/api/schedules/${id}/run`,{method:"POST"});
     const raw=await r.text();
     let d;
-    try{d=JSON.parse(raw);}catch(e){showToast("Server error: "+raw.slice(0,60),"error");return;}
+    try{d=JSON.parse(raw);}catch(e){showToast("Server error: "+raw.slice(0,80),"error");return;}
     if(d.success)showToast("✅ Email sent!","success");
-    else showToast("Failed: "+(d.error||"unknown"),"error");
+    else showToast("Failed: "+(d.error||"Unknown error"),"error");
     loadSchedules();
-  }catch(e){showToast("Network error","error");}
+  }catch(e){showToast("Network error: "+e.message,"error");}
 }
-async function toggleSchedule(id){await fetch(`/api/schedules/${id}/toggle`,{method:"POST"});loadSchedules();}
+async function toggleSchedule(id){
+  await fetch(`/api/schedules/${id}/toggle`,{method:"POST"});
+  loadSchedules();
+}
 async function deleteSchedule(id){
   if(!confirm("Delete this schedule?"))return;
   await fetch(`/api/schedules/${id}`,{method:"DELETE"});
