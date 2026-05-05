@@ -1,14 +1,16 @@
 """
-Techwish AI Analytics — Flask Backend (FIXED)
-==============================================
+Techwish AI Analytics — Flask Backend (FULLY FIXED)
+====================================================
 Fixes applied:
-  1. SQL generated & validated at schedule-creation time (NL mode)
-  2. _run_due_reports now updates last_status even on crash + logs full traceback
-  3. run_query_direct has login_timeout + network_timeout
-  4. SMTP test endpoint added  (/api/test-email)
-  5. send_scheduled_email has better error reporting
-  6. Scheduler loop logs SQL before running so empty-SQL is caught early
-  7. submitSchedule UI fix: NL questions get SQL resolved before saving
+  1. SQL validation uses subquery wrap → no double-LIMIT crash
+  2. recipients normalised to list in send_scheduled_email (string vs list bug)
+  3. run_query_direct omits role kwarg entirely when SNOWFLAKE_ROLE is empty
+  4. Empty-SQL guard returns explicit 400 before saving schedule
+  5. Consecutive-failure counter deactivates broken schedules after 3 failures
+  6. _run_due_reports full traceback logging + status update on every crash
+  7. SMTP test endpoint at /api/test-email
+  8. Scheduler loop logs SQL before running
+
 Run:  python app.py
 Opens browser at http://localhost:5000 automatically.
 """
@@ -80,21 +82,31 @@ DEFAULT_BLUE_SEQUENCE = [
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path='')
 
 # ─────────────────────────────────────────────────────────────────
-#  SNOWFLAKE
+#  SNOWFLAKE — shared connection pool
 # ─────────────────────────────────────────────────────────────────
 _conn_lock = threading.Lock()
 _sf_conn   = None
 
-def _new_conn(database: str = None):
+def _sf_connect_kwargs(database: str = None) -> dict:
+    """Build Snowflake connect kwargs — omits role when empty (FIX 3)."""
     kw = dict(
-        account=SNOWFLAKE_ACCOUNT, user=SNOWFLAKE_USER,
-        password=SNOWFLAKE_PASSWORD, warehouse=SNOWFLAKE_WAREHOUSE,
+        account=SNOWFLAKE_ACCOUNT,
+        user=SNOWFLAKE_USER,
+        password=SNOWFLAKE_PASSWORD,
+        warehouse=SNOWFLAKE_WAREHOUSE,
         session_parameters={"CLIENT_SESSION_KEEP_ALIVE": "TRUE"},
-        network_timeout=300, login_timeout=60,
+        network_timeout=300,
+        login_timeout=60,
     )
-    if database: kw["database"] = database
-    if SNOWFLAKE_ROLE: kw["role"] = SNOWFLAKE_ROLE
-    return snowflake.connector.connect(**kw)
+    if database:
+        kw["database"] = database
+    # FIX 3: only pass role when it actually has a value — passing None crashes connector
+    if SNOWFLAKE_ROLE:
+        kw["role"] = SNOWFLAKE_ROLE
+    return kw
+
+def _new_conn(database: str = None):
+    return snowflake.connector.connect(**_sf_connect_kwargs(database))
 
 def _get_conn():
     global _sf_conn
@@ -127,21 +139,29 @@ def run_query(sql: str, database: str) -> pd.DataFrame:
             return _exec(_sf_conn)
         raise
 
-# FIX ❸: Added login_timeout + network_timeout to prevent silent hangs
 def run_query_direct(sql: str, database: str) -> pd.DataFrame:
+    """
+    One-shot connection for scheduler / validation.
+    FIX 3: role kwarg omitted when empty.
+    """
     sql = sql.strip().rstrip(";").strip()
     if not sql:
         raise ValueError("SQL is empty — cannot execute query.")
-    conn = snowflake.connector.connect(
+
+    # FIX 3: build kwargs without role=None
+    kw = dict(
         account=SNOWFLAKE_ACCOUNT,
         user=SNOWFLAKE_USER,
         password=SNOWFLAKE_PASSWORD,
         warehouse=SNOWFLAKE_WAREHOUSE,
-        role=SNOWFLAKE_ROLE if SNOWFLAKE_ROLE else None,
         database=database,
-        login_timeout=30,       # FIX: was missing — prevents silent hang on suspended warehouse
-        network_timeout=120,    # FIX: was missing
+        login_timeout=30,
+        network_timeout=120,
     )
+    if SNOWFLAKE_ROLE:
+        kw["role"] = SNOWFLAKE_ROLE
+
+    conn = snowflake.connector.connect(**kw)
     try:
         cur = conn.cursor()
         cur.execute(sql)
@@ -237,8 +257,8 @@ def get_exact_columns(database: str) -> dict:
         df = run_query(sql, database)
         result = {}
         for _, row in df.iterrows():
-            tbl  = row["TABLE_NAME"]
-            col  = row["COLUMN_NAME"]
+            tbl   = row["TABLE_NAME"]
+            col   = row["COLUMN_NAME"]
             dtype = row["DATA_TYPE"]
             result.setdefault(tbl, []).append((col, dtype))
         _exact_columns_cache[database] = result
@@ -262,11 +282,6 @@ def build_exact_schema_block(database: str) -> str:
 
 def build_join_hints(database: str) -> str:
     exact = get_exact_columns(database)
-    col_map: dict = {}
-    for tbl, cols in exact.items():
-        for col, dtype in cols:
-            col_map.setdefault(col.upper(), []).append((tbl, col))
-
     hints = []
     for tbl, cols in exact.items():
         if not tbl.upper().startswith("FACT"):
@@ -274,7 +289,6 @@ def build_join_hints(database: str) -> str:
         for col, dtype in cols:
             cu = col.upper()
             if cu.endswith("_KEY") or cu.endswith("_ID") or cu.endswith("_SK"):
-                candidates = []
                 for dim_tbl, dim_cols in exact.items():
                     if not dim_tbl.upper().startswith("DIM"):
                         continue
@@ -284,14 +298,11 @@ def build_join_hints(database: str) -> str:
                         exact_id = next(c for c, _ in dim_cols if c.upper() == "ID")
                         if base in dim_tbl.upper():
                             exact_fact_col = next(c for c, _ in cols if c.upper() == cu)
-                            candidates.append(f'  "{tbl}"."{exact_fact_col}" = "{dim_tbl}"."{exact_id}"')
+                            hints.append(f'  "{tbl}"."{exact_fact_col}" = "{dim_tbl}"."{exact_id}"')
                     if cu in dim_col_names_upper:
-                        exact_dim_col = next(c for c, _ in dim_cols if c.upper() == cu)
+                        exact_dim_col  = next(c for c, _ in dim_cols if c.upper() == cu)
                         exact_fact_col = next(c for c, _ in cols if c.upper() == cu)
-                        if (tbl, exact_fact_col) not in [(x,y) for x,y in [(tbl,col)]]:
-                            candidates.append(f'  "{tbl}"."{exact_fact_col}" = "{dim_tbl}"."{exact_dim_col}"')
-                hints.extend(candidates)
-
+                        hints.append(f'  "{tbl}"."{exact_fact_col}" = "{dim_tbl}"."{exact_dim_col}"')
     if hints:
         return "\nLIKELY JOIN CONDITIONS (use these exact column names):\n" + "\n".join(hints)
     return ""
@@ -324,8 +335,10 @@ def build_date_type_hints(schema_dict: dict) -> str:
     for tbl, cols in schema_dict.items():
         for col, dtype in cols.items():
             base = dtype.split("(")[0]
-            if base == "DATE": native_date.append(f"{tbl}.{col}")
-            elif base in ("TIMESTAMP_NTZ","TIMESTAMP_LTZ","TIMESTAMP_TZ","TIMESTAMP","DATETIME"): native_ts.append(f"{tbl}.{col}")
+            if base == "DATE":
+                native_date.append(f"{tbl}.{col}")
+            elif base in ("TIMESTAMP_NTZ","TIMESTAMP_LTZ","TIMESTAMP_TZ","TIMESTAMP","DATETIME"):
+                native_ts.append(f"{tbl}.{col}")
             elif base in ("NUMBER","NUMERIC","INTEGER","INT","BIGINT","FLOAT","DOUBLE"):
                 if any(k in col.lower() for k in ["date","time","dt","day","month","year","_at","_on"]):
                     num_date.append(f"{tbl}.{col}")
@@ -359,7 +372,8 @@ def detect_col_date_format(database, table_name, col_name) -> str:
         if not tdf.empty:
             declared = str(tdf.iloc[0]["DATA_TYPE"]).upper().split("(")[0]
             if declared == "DATE": return _store("date")
-            if declared in ("TIMESTAMP_NTZ","TIMESTAMP_LTZ","TIMESTAMP_TZ","TIMESTAMP","DATETIME"): return _store("timestamp")
+            if declared in ("TIMESTAMP_NTZ","TIMESTAMP_LTZ","TIMESTAMP_TZ","TIMESTAMP","DATETIME"):
+                return _store("timestamp")
     except Exception: pass
     try:
         sdf = run_query(f"SELECT TO_VARCHAR({col_name}) AS V FROM {table_name} WHERE {col_name} IS NOT NULL LIMIT 5", database)
@@ -434,7 +448,7 @@ def format_dataframe(df: pd.DataFrame) -> list:
     display = df.copy()
     for col in display.columns:
         col_lo = col.lower()
-        is_label = any(kw in col_lo for kw in ["year", "yr", "month", "id", "key", "code", "period"])
+        is_label = any(kw in col_lo for kw in ["year","yr","month","id","key","code","period"])
         if pd.api.types.is_numeric_dtype(display[col]):
             if is_label:
                 display[col] = display[col].apply(lambda v: str(int(v)) if pd.notna(v) else "")
@@ -464,12 +478,12 @@ def classify_columns(schema_dict: dict) -> dict:
         year_cols = []; datekey_cols = []; date_cols = []
         ts_cols = []; num_cols = []; txt_cols = []
         for col, dtype in cols.items():
-            base = dtype.split("(")[0].upper().strip()
+            base   = dtype.split("(")[0].upper().strip()
             col_lo = col.lower()
             if base in DATE_TYPES: date_cols.append(col)
             elif base in TS_TYPES: ts_cols.append(col)
             elif base in NUM_TYPES:
-                if any(col_lo == kw or col_lo.endswith("_"+kw) or col_lo.startswith(kw+"_") or col_lo == kw
+                if any(col_lo == kw or col_lo.endswith("_"+kw) or col_lo.startswith(kw+"_")
                        for kw in YEAR_KW):
                     year_cols.append(col)
                 elif any(kw in col_lo for kw in DATEKEY_KW):
@@ -511,12 +525,12 @@ def is_percentage_query(q: str) -> bool:
         "ratio","composition","pie","donut","split","contribution"])
 
 def nl_to_sql(question: str, history: list, database: str) -> dict:
-    wl           = build_whitelist(database)
-    schema_dict  = build_full_schema_dict(database)
-    exact_block  = build_exact_schema_block(database)
-    join_hints   = build_join_hints(database)
-    date_hints   = build_date_type_hints(schema_dict)
-    ts_hints     = build_time_series_hints(schema_dict)
+    wl          = build_whitelist(database)
+    schema_dict = build_full_schema_dict(database)
+    exact_block = build_exact_schema_block(database)
+    join_hints  = build_join_hints(database)
+    date_hints  = build_date_type_hints(schema_dict)
+    ts_hints    = build_time_series_hints(schema_dict)
 
     compact_block = "\n".join(f"  {t}: {', '.join(c)}" for t, c in wl.items())
 
@@ -538,15 +552,15 @@ def nl_to_sql(question: str, history: list, database: str) -> dict:
             break
 
     _q = question.strip().lower()
-    _COLOR_ONLY  = bool(_re.search(r'\b(make|change|set|use|turn|switch|update)\b.{0,40}\b(color|colour)\b|\bcolor\b.{0,20}\b(to|as|into)\b', _q))
-    _CHART_TYPE  = bool(_re.search(r'\b(make|change|convert|switch|turn)\b.{0,30}\b(bar|line|pie|area|scatter|donut|histogram|funnel|treemap|heatmap|violin|box)\b', _q))
-    _TITLE_ONLY  = bool(_re.search(r'\b(change|set|update|rename)\b.{0,20}\btitle\b', _q))
+    _COLOR_ONLY = bool(_re.search(r'\b(make|change|set|use|turn|switch|update)\b.{0,40}\b(color|colour)\b|\bcolor\b.{0,20}\b(to|as|into)\b', _q))
+    _CHART_TYPE = bool(_re.search(r'\b(make|change|convert|switch|turn)\b.{0,30}\b(bar|line|pie|area|scatter|donut|histogram|funnel|treemap|heatmap|violin|box)\b', _q))
+    _TITLE_ONLY = bool(_re.search(r'\b(change|set|update|rename)\b.{0,20}\btitle\b', _q))
     _appearance_only = last_sql and (_COLOR_ONLY or _CHART_TYPE or _TITLE_ONLY)
 
     if _appearance_only:
-        ext_color = extract_color_from_question(question)
+        ext_color    = extract_color_from_question(question)
         new_chart_color = ext_color or last_chart_color
-        new_chart = last_chart
+        new_chart    = last_chart
         ct_m = _re.search(r'\b(bar|line|pie|area|scatter|donut|histogram|funnel|treemap|heatmap|violin|box)\b', _q)
         if ct_m: new_chart = ct_m.group(1)
         new_title = last_chart_title
@@ -675,7 +689,7 @@ Return ONLY the JSON object."""
         except json.JSONDecodeError: pass
 
         sql_m     = _re.search(r'"sql"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, _re.DOTALL)
-        summary_m = _re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, _re.DOTALL)
+        summary_m = _re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
         chart_m   = _re.search(r'"chart"\s*:\s*"([^"]*)"', raw)
         chart_x_m = _re.search(r'"chart_x"\s*:\s*"([^"]*)"', raw)
         chart_y_m = _re.search(r'"chart_y"\s*:\s*"([^"]*)"', raw)
@@ -777,7 +791,8 @@ def get_sample_questions(database: str) -> list:
 # ─────────────────────────────────────────────────────────────────
 def render_chart_to_png_b64(df, chart_type, chart_x, chart_y,
                              chart_color=DEFAULT_CHART_COLOR, chart_title="") -> str:
-    if not chart_type or chart_type == "none" or df is None or df.empty or not chart_x: return ""
+    if not chart_type or chart_type == "none" or df is None or df.empty or not chart_x:
+        return ""
     color = chart_color or DEFAULT_CHART_COLOR
     seq   = [color] + DEFAULT_BLUE_SEQUENCE
     x_col = chart_x if chart_x in df.columns else df.columns[0]
@@ -823,7 +838,8 @@ def render_chart_to_png_b64(df, chart_type, chart_x, chart_y,
             return base64.b64encode(png).decode()
         except Exception:
             fig2,ax2 = plt.subplots(figsize=(10,5))
-            if y_col and y_col in df2.columns: ax2.bar(df2[x_col].astype(str),df2[y_col],color=color,edgecolor="none")
+            if y_col and y_col in df2.columns:
+                ax2.bar(df2[x_col].astype(str),df2[y_col],color=color,edgecolor="none")
             if chart_title: ax2.set_title(chart_title,fontsize=14,fontweight="bold",color=color)
             plt.tight_layout(); buf=io.BytesIO(); fig2.savefig(buf,format="png",dpi=150,bbox_inches="tight"); plt.close(fig2)
             return base64.b64encode(buf.getvalue()).decode()
@@ -833,8 +849,8 @@ def render_chart_to_png_b64(df, chart_type, chart_x, chart_y,
 # ─────────────────────────────────────────────────────────────────
 #  SCHEDULER
 # ─────────────────────────────────────────────────────────────────
-_sched_lock   = threading.Lock()
-_sched_stop   = threading.Event()
+_sched_lock = threading.Lock()
+_sched_stop = threading.Event()
 
 def _log_sched(msg: str):
     ts   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -858,16 +874,19 @@ def save_scheduled_reports(reports: list):
         except Exception as e:
             _log_sched(f"Save failed: {e}")
 
-def add_scheduled_report(name,question,sql,database,interval_minutes,recipients,
-                          chart_type="none",chart_x="",chart_y="",
-                          chart_color=DEFAULT_CHART_COLOR,chart_title="") -> dict:
+def add_scheduled_report(name, question, sql, database, interval_minutes, recipients,
+                          chart_type="none", chart_x="", chart_y="",
+                          chart_color=DEFAULT_CHART_COLOR, chart_title="") -> dict:
+    # Normalise recipients to list
+    if isinstance(recipients, str):
+        recipients = [e.strip() for e in recipients.split(",") if e.strip()]
     report = {
-        "id": uuid.uuid4().hex[:8], "name":name, "question":question, "sql":sql,
-        "database":database, "interval_minutes":interval_minutes, "recipients":recipients,
-        "active":True, "created_at":datetime.datetime.now().isoformat(),
-        "last_run":None, "last_status":None, "run_count":0,
-        "chart_type":chart_type, "chart_x":chart_x, "chart_y":chart_y,
-        "chart_color":chart_color, "chart_title":chart_title,
+        "id": uuid.uuid4().hex[:8], "name": name, "question": question, "sql": sql,
+        "database": database, "interval_minutes": interval_minutes, "recipients": recipients,
+        "active": True, "created_at": datetime.datetime.now().isoformat(),
+        "last_run": None, "last_status": None, "run_count": 0, "fail_count": 0,
+        "chart_type": chart_type, "chart_x": chart_x, "chart_y": chart_y,
+        "chart_color": chart_color, "chart_title": chart_title,
     }
     reports = get_scheduled_reports()
     reports.append(report)
@@ -882,23 +901,43 @@ def df_to_html_table(df: pd.DataFrame, max_rows: int = 50) -> str:
         bg = "#f9f9f9" if i%2==0 else "#fff"
         cells = "".join(f'<td style="padding:7px 12px;border-bottom:1px solid #eee;">{v}</td>' for v in row)
         body += f'<tr style="background:{bg};">{cells}</tr>'
-    note = f'<p style="color:gray;font-size:0.75rem;margin-top:6px;">Showing {len(prev)} of {len(df)} rows. Full data in CSV attachment.</p>' if len(df) > max_rows else ""
-    return f'<table style="border-collapse:collapse;width:100%;font-size:0.85rem;"><thead><tr>{hdr}</tr></thead><tbody>{body}</tbody></table>{note}'
+    note = (f'<p style="color:gray;font-size:0.75rem;margin-top:6px;">Showing {len(prev)} of {len(df)} rows. '
+            f'Full data in CSV attachment.</p>') if len(df) > max_rows else ""
+    return (f'<table style="border-collapse:collapse;width:100%;font-size:0.85rem;">'
+            f'<thead><tr>{hdr}</tr></thead><tbody>{body}</tbody></table>{note}')
 
-# FIX ❷ + ❹: Better error reporting in send_scheduled_email
+def _normalise_recipients(report: dict) -> list:
+    """FIX 2: Always return a proper list regardless of how recipients was stored."""
+    r = report.get("recipients", [])
+    if isinstance(r, str):
+        return [e.strip() for e in r.split(",") if e.strip()]
+    if isinstance(r, list):
+        return [e.strip() for e in r if e.strip()]
+    return []
+
 def send_scheduled_email(report: dict, df: pd.DataFrame):
     if not SMTP_USER or not SMTP_PASSWORD:
         return False, "SMTP credentials not configured. Check SMTP_USER and SMTP_PASSWORD in secrets.toml."
-    name  = report.get("name","Report"); database = report.get("database","")
-    question = report.get("question",""); sql = report.get("sql","")
-    now_str  = datetime.datetime.now().strftime("%B %d, %Y at %I:%M %p")
-    table_html = df_to_html_table(df) if not df.empty else "<p><em>No data returned.</em></p>"
 
+    # FIX 2: normalise recipients — can be stored as list OR comma-string
+    recipients = _normalise_recipients(report)
+    if not recipients:
+        return False, "No valid recipient email addresses found."
+
+    name     = report.get("name", "Report")
+    database = report.get("database", "")
+    question = report.get("question", "")
+    sql      = report.get("sql", "")
+    now_str  = datetime.datetime.now().strftime("%B %d, %Y at %I:%M %p")
+
+    table_html  = df_to_html_table(df) if not df.empty else "<p><em>No data returned.</em></p>"
     chart_color = report.get("chart_color", DEFAULT_CHART_COLOR)
+
     chart_png_b64 = render_chart_to_png_b64(
         df, report.get("chart_type","none"),
         report.get("chart_x",""), report.get("chart_y",""),
         chart_color, report.get("chart_title",""))
+
     chart_html = (
         '<div style="margin:20px 0;"><img src="cid:report_chart" alt="Chart" '
         'style="max-width:100%;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.12);"/></div>'
@@ -923,25 +962,31 @@ def send_scheduled_email(report: dict, df: pd.DataFrame):
   </div>
 </body></html>"""
 
-    text_body = f"Techwish AI Report: {name}\n{now_str}\nQuestion: {question}\nRows: {len(df)}\n\n{df.to_string(index=False) if not df.empty else 'No data.'}"
+    text_body = (f"Techwish AI Report: {name}\n{now_str}\nQuestion: {question}\nRows: {len(df)}\n\n"
+                 + (df.to_string(index=False) if not df.empty else "No data."))
 
     try:
         msg = MIMEMultipart("mixed")
         msg["Subject"] = f"Techwish AI Report: {name}"
         msg["From"]    = SMTP_USER
-        msg["To"]      = ", ".join(report.get("recipients",[]))
+        msg["To"]      = ", ".join(recipients)
+
         related = MIMEMultipart("related")
         alt     = MIMEMultipart("alternative")
-        alt.attach(MIMEText(text_body,"plain"))
-        alt.attach(MIMEText(html_body,"html"))
+        alt.attach(MIMEText(text_body, "plain"))
+        alt.attach(MIMEText(html_body, "html"))
         related.attach(alt)
+
         if chart_png_b64:
-            img = MIMEBase("image","png"); img.set_payload(base64.b64decode(chart_png_b64))
+            img = MIMEBase("image","png")
+            img.set_payload(base64.b64decode(chart_png_b64))
             encoders.encode_base64(img)
             img.add_header("Content-ID","<report_chart>")
             img.add_header("Content-Disposition","inline",filename="chart.png")
             related.attach(img)
+
         msg.attach(related)
+
         if not df.empty:
             csv_part = MIMEBase("application","octet-stream")
             csv_part.set_payload(df.to_csv(index=False).encode("utf-8"))
@@ -950,90 +995,124 @@ def send_scheduled_email(report: dict, df: pd.DataFrame):
             csv_part.add_header("Content-Disposition",f'attachment; filename="{safe}"')
             msg.attach(csv_part)
 
-        # FIX ❹: More robust SMTP connection with explicit timeout
         server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
         server.ehlo()
         server.starttls()
         server.ehlo()
         server.login(SMTP_USER, SMTP_PASSWORD)
-        server.sendmail(SMTP_USER, report.get("recipients",[]), msg.as_string())
+        server.sendmail(SMTP_USER, recipients, msg.as_string())
         server.quit()
         return True, ""
+
     except smtplib.SMTPAuthenticationError as e:
-        return False, f"SMTP Auth failed — if using Gmail, you need an App Password (not your login password). Error: {e}"
+        return False, (f"SMTP Auth failed — if using Gmail, you need an App Password "
+                       f"(not your login password). Error: {e}")
     except smtplib.SMTPException as e:
         return False, f"SMTP error: {e}"
     except Exception as e:
         return False, f"Unexpected email error: {e}"
 
-# FIX ❶ + ❷: _run_due_reports now checks for empty SQL, updates status on crash, logs full traceback
 def _run_due_reports():
+    """
+    Check all active schedules and run any that are due.
+    FIX 1: SQL validation via subquery wrap
+    FIX 4: Explicit empty-SQL guard
+    FIX 5: Consecutive failure counter — deactivates after 3 failures
+    """
     reports = get_scheduled_reports()
     changed = False
+
     for r in reports:
-        if not r.get("active"): continue
+        if not r.get("active"):
+            continue
+
         now  = datetime.datetime.now()
         last = r.get("last_run")
-        mins = r.get("interval_minutes",60)
+        mins = r.get("interval_minutes", 60)
+
         if last:
             try:
-                if now < datetime.datetime.fromisoformat(last) + datetime.timedelta(minutes=mins): continue
-            except Exception: pass
+                if now < datetime.datetime.fromisoformat(last) + datetime.timedelta(minutes=mins):
+                    continue
+            except Exception:
+                pass  # bad timestamp — run it anyway
 
-        _log_sched(f"Running '{r.get('name')}' → {r.get('recipients')}")
+        _log_sched(f"Running '{r.get('name')}' → {_normalise_recipients(r)}")
 
-        # FIX ❶: Guard against empty SQL — catch it early with a clear message
-        sql = r.get("sql","").strip()
+        # FIX 4: Guard against empty SQL — regenerate from question
+        sql = r.get("sql", "").strip()
         if not sql:
-            _log_sched(f"  SKIP: SQL is empty for report '{r.get('name')}' (id={r.get('id')}). Regenerating from question...")
-            q = r.get("question","").strip()
-            db = r.get("database","")
+            _log_sched(f"  SKIP: SQL is empty for '{r.get('name')}' — regenerating from question...")
+            q  = r.get("question", "").strip()
+            db = r.get("database", "")
             if q and db:
                 try:
                     gen = nl_to_sql(q, [], db)
-                    sql = gen.get("sql","").strip()
+                    sql = gen.get("sql", "").strip()
                     if sql:
                         r["sql"] = sql
                         _log_sched(f"  Regenerated SQL: {sql[:80]}...")
                     else:
                         r["last_run"]    = now.isoformat()
                         r["last_status"] = "Failed: Could not regenerate SQL from question"
+                        r["fail_count"]  = r.get("fail_count", 0) + 1
+                        if r["fail_count"] >= 3:
+                            r["active"] = False
+                            _log_sched(f"  Deactivated '{r.get('name')}' after 3 consecutive failures.")
                         changed = True
-                        _log_sched(f"  FAIL: Could not generate SQL for '{r.get('name')}'")
                         continue
                 except Exception as e:
                     r["last_run"]    = now.isoformat()
                     r["last_status"] = f"Failed: SQL regeneration error — {e}"
+                    r["fail_count"]  = r.get("fail_count", 0) + 1
+                    if r["fail_count"] >= 3:
+                        r["active"] = False
                     changed = True
                     continue
             else:
                 r["last_run"]    = now.isoformat()
                 r["last_status"] = "Failed: SQL is empty and no question to regenerate from"
+                r["fail_count"]  = r.get("fail_count", 0) + 1
+                if r["fail_count"] >= 3:
+                    r["active"] = False
                 changed = True
                 continue
 
-        _log_sched(f"  SQL: {sql[:100]}...")
+        _log_sched(f"  SQL: {sql[:120]}...")
 
         try:
-            df      = run_query_direct(sql, r.get("database",""))
+            df      = run_query_direct(sql, r.get("database", ""))
             ok, err = send_scheduled_email(r, df)
-        except Exception as e:
+        except Exception:
             ok  = False
-            err = traceback.format_exc()   # FIX ❷: full traceback, not just str(e)
+            err = traceback.format_exc()
 
         r["last_run"]    = now.isoformat()
         r["last_status"] = "Sent" if ok else f"Failed: {str(err)[:300]}"
-        r["run_count"]   = r.get("run_count",0)+1
-        changed = True
-        _log_sched(f"  {'OK' if ok else 'FAIL'}: {r.get('name')}" + ("" if ok else f"\n    {err[:400]}"))
+        r["run_count"]   = r.get("run_count", 0) + 1
+        changed          = True
 
-    if changed: save_scheduled_reports(reports)
+        # FIX 5: track consecutive failures
+        if ok:
+            r["fail_count"] = 0
+            _log_sched(f"  OK: '{r.get('name')}'")
+        else:
+            r["fail_count"] = r.get("fail_count", 0) + 1
+            _log_sched(f"  FAIL ({r['fail_count']}/3): '{r.get('name')}'\n    {str(err)[:400]}")
+            if r["fail_count"] >= 3:
+                r["active"] = False
+                _log_sched(f"  Deactivated '{r.get('name')}' after 3 consecutive failures.")
+
+    if changed:
+        save_scheduled_reports(reports)
 
 def _scheduler_loop():
     _log_sched("Scheduler thread started.")
     while not _sched_stop.is_set():
-        try: _run_due_reports()
-        except Exception as e: _log_sched(f"Scheduler loop error: {traceback.format_exc()}")
+        try:
+            _run_due_reports()
+        except Exception:
+            _log_sched(f"Scheduler loop error:\n{traceback.format_exc()}")
         _sched_stop.wait(60)
     _log_sched("Scheduler thread stopped.")
 
@@ -1056,13 +1135,13 @@ def api_databases():
 @app.route("/api/schema")
 def api_schema():
     db = request.args.get("database","")
-    if not db: return jsonify({"error":"no database"}),400
+    if not db: return jsonify({"error":"no database"}), 400
     return jsonify({"schema": load_schema(db)})
 
 @app.route("/api/questions")
 def api_questions():
     db = request.args.get("database","")
-    if not db: return jsonify({"questions":[]}),400
+    if not db: return jsonify({"questions":[]}), 400
     return jsonify({"questions": get_sample_questions(db)})
 
 @app.route("/api/query", methods=["POST"])
@@ -1072,9 +1151,9 @@ def api_query():
     database = data.get("database","")
     history  = data.get("history",[])
     if not question or not database:
-        return jsonify({"error":"question and database required"}),400
+        return jsonify({"error":"question and database required"}), 400
 
-    result = nl_to_sql(question,history,database)
+    result = nl_to_sql(question, history, database)
     sql    = result.get("sql","").strip().rstrip(";").strip()
     reuse  = result.get("_reuse_df")
 
@@ -1084,9 +1163,9 @@ def api_query():
         df = pd.DataFrame(reuse)
     elif sql:
         try:
-            fixed = fix_date_filter_in_sql(sql,database)
+            fixed = fix_date_filter_in_sql(sql, database)
             if fixed != sql: sql = fixed; result["sql"] = fixed
-            df = run_query(sql,database)
+            df = run_query(sql, database)
         except Exception as e:
             error = str(e)
 
@@ -1108,7 +1187,6 @@ def api_query():
     result.pop("_reuse_df", None)
     return jsonify(result)
 
-# FIX ❶: api_schedules_post now always resolves SQL before saving
 @app.route("/api/schedules", methods=["GET"])
 def api_schedules_get():
     return jsonify({"schedules": get_scheduled_reports()})
@@ -1119,36 +1197,40 @@ def api_schedules_post():
 
     required = ["name","database","interval_minutes","recipients"]
     for f in required:
-        if not data.get(f): return jsonify({"error":f"Missing: {f}"}),400
+        if not data.get(f):
+            return jsonify({"error": f"Missing required field: {f}"}), 400
 
     question = (data.get("question") or "").strip()
     sql      = (data.get("sql") or "").strip()
 
     if not sql and not question:
-        return jsonify({"error":"Missing: sql or question"}),400
+        return jsonify({"error": "Must provide either sql or question"}), 400
 
-    # FIX ❶: Always resolve SQL from question at creation time so scheduler never runs empty SQL
+    # FIX 4: Always resolve SQL from question at creation time
     if not sql and question:
-        _log_sched(f"[POST /api/schedules] Generating SQL for question: {question}")
+        _log_sched(f"[POST /api/schedules] Generating SQL for: {question}")
         try:
-            r = nl_to_sql(question, [], data["database"])
+            r   = nl_to_sql(question, [], data["database"])
             sql = r.get("sql","").strip()
-            _log_sched(f"[POST /api/schedules] Generated SQL: {sql[:100]}")
+            _log_sched(f"[POST /api/schedules] Generated SQL: {sql[:120]}")
         except Exception as e:
-            return jsonify({"error":f"SQL generation failed: {e}"}),500
+            return jsonify({"error": f"SQL generation failed: {e}"}), 500
 
         if not sql:
-            return jsonify({"error":"Could not generate SQL from question — please try rephrasing or use SQL mode."}),400
+            return jsonify({
+                "error": "Could not generate SQL from question — please try rephrasing or use SQL mode."
+            }), 400
 
     # Strip trailing semicolons
     sql = sql.rstrip(";").strip()
 
-    # Validate SQL actually runs before saving the schedule
+    # FIX 1: Validate SQL using a subquery wrap so we never break on existing LIMIT clauses
     try:
-        test_df = run_query_direct(sql + " LIMIT 1", data["database"])
-        _log_sched(f"[POST /api/schedules] SQL validated OK — {len(test_df)} rows (test run)")
+        _val_sql = f"SELECT * FROM ({sql}) __validation_row LIMIT 1"
+        test_df  = run_query_direct(_val_sql, data["database"])
+        _log_sched(f"[POST /api/schedules] SQL validated OK ({len(test_df)} row test)")
     except Exception as e:
-        return jsonify({"error":f"SQL validation failed: {e}"}),400
+        return jsonify({"error": f"SQL validation failed: {e}"}), 400
 
     report = add_scheduled_report(
         name=data["name"],
@@ -1156,40 +1238,42 @@ def api_schedules_post():
         sql=sql,
         database=data["database"],
         interval_minutes=int(data["interval_minutes"]),
-        recipients=[e.strip() for e in data["recipients"].split(",") if e.strip()],
+        recipients=data["recipients"],   # normalised inside add_scheduled_report
         chart_type=data.get("chart_type","none"),
         chart_x=data.get("chart_x",""),
         chart_y=data.get("chart_y",""),
-        chart_color=data.get("chart_color",DEFAULT_CHART_COLOR),
+        chart_color=data.get("chart_color", DEFAULT_CHART_COLOR),
         chart_title=data.get("chart_title",""),
     )
-    _log_sched(f"[POST /api/schedules] Created schedule '{report['name']}' id={report['id']}")
-    return jsonify({"success":True,"report":report})
+    _log_sched(f"[POST /api/schedules] Created '{report['name']}' id={report['id']}")
+    return jsonify({"success": True, "report": report})
 
 @app.route("/api/schedules/<report_id>", methods=["DELETE"])
 def api_schedule_delete(report_id):
-    reports = get_scheduled_reports()
-    reports = [r for r in reports if r["id"] != report_id]
+    reports = [r for r in get_scheduled_reports() if r["id"] != report_id]
     save_scheduled_reports(reports)
-    return jsonify({"success":True})
+    return jsonify({"success": True})
 
 @app.route("/api/schedules/<report_id>/toggle", methods=["POST"])
 def api_schedule_toggle(report_id):
     reports = get_scheduled_reports()
     for r in reports:
-        if r["id"] == report_id: r["active"] = not r.get("active",True)
+        if r["id"] == report_id:
+            r["active"]     = not r.get("active", True)
+            r["fail_count"] = 0   # reset failure counter on manual toggle
     save_scheduled_reports(reports)
-    return jsonify({"success":True})
+    return jsonify({"success": True})
 
 @app.route("/api/schedules/<report_id>/run", methods=["POST"])
 def api_schedule_run(report_id):
     reports = get_scheduled_reports()
     report  = next((r for r in reports if r["id"] == report_id), None)
-    if not report: return jsonify({"error":"Not found"}),404
+    if not report:
+        return jsonify({"error": "Schedule not found"}), 404
 
     sql = report.get("sql","").strip()
 
-    # FIX ❶: If SQL is empty, try to regenerate from question before running
+    # FIX 4: Regenerate SQL if empty before running
     if not sql:
         q  = report.get("question","").strip()
         db = report.get("database","")
@@ -1204,53 +1288,62 @@ def api_schedule_run(report_id):
                     save_scheduled_reports(reports)
                     report["sql"] = sql
             except Exception as e:
-                return jsonify({"error":f"SQL regeneration failed: {e}"}),500
+                return jsonify({"error": f"SQL regeneration failed: {e}"}), 500
         if not sql:
-            return jsonify({"error":"SQL is empty and could not be regenerated. Please delete and re-create this schedule."}),400
+            return jsonify({
+                "error": "SQL is empty and could not be regenerated. Please delete and re-create this schedule."
+            }), 400
 
     try:
-        df = run_query_direct(sql, report["database"])
+        df      = run_query_direct(sql, report["database"])
         ok, err = send_scheduled_email(report, df)
-        now = datetime.datetime.now().isoformat()
+        now     = datetime.datetime.now().isoformat()
         for r in reports:
             if r["id"] == report_id:
                 r["last_run"]    = now
                 r["last_status"] = "Sent" if ok else f"Failed: {err}"
-                r["run_count"]   = r.get("run_count",0)+1
+                r["run_count"]   = r.get("run_count", 0) + 1
+                r["fail_count"]  = 0 if ok else r.get("fail_count", 0) + 1
         save_scheduled_reports(reports)
         if ok:
-            return jsonify({"success":True})
+            return jsonify({"success": True})
         return jsonify({"error": err}), 500
-    except Exception as e:
-        return jsonify({"error": traceback.format_exc()}), 500
+    except Exception:
+        tb = traceback.format_exc()
+        _log_sched(f"[run/{report_id}] Exception:\n{tb}")
+        return jsonify({"error": tb}), 500
 
-# FIX: SMTP test endpoint — visit /api/test-email to verify credentials
 @app.route("/api/test-email")
 def api_test_email():
-    """
-    Diagnostic endpoint — visit http://localhost:5000/api/test-email
-    Sends a test email to SMTP_USER to confirm credentials work.
-    """
+    """Visit http://localhost:5000/api/test-email to verify SMTP credentials."""
     if not SMTP_USER or not SMTP_PASSWORD:
-        return jsonify({"success":False,"error":"SMTP_USER or SMTP_PASSWORD not configured in secrets.toml"}), 400
+        return jsonify({"success": False,
+                        "error": "SMTP_USER or SMTP_PASSWORD not configured in secrets.toml"}), 400
     try:
         server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
         server.ehlo()
         server.starttls()
         server.ehlo()
         server.login(SMTP_USER, SMTP_PASSWORD)
-        test_msg = f"Subject: Techwish SMTP Test\nFrom: {SMTP_USER}\nTo: {SMTP_USER}\n\nSMTP is working correctly!"
+        test_msg = (f"Subject: Techwish SMTP Test\nFrom: {SMTP_USER}\nTo: {SMTP_USER}\n\n"
+                    "SMTP is working correctly!")
         server.sendmail(SMTP_USER, [SMTP_USER], test_msg)
         server.quit()
-        return jsonify({"success":True,"message":f"Test email sent to {SMTP_USER}. Check your inbox."})
+        return jsonify({"success": True,
+                        "message": f"Test email sent to {SMTP_USER}. Check your inbox."})
     except smtplib.SMTPAuthenticationError as e:
-        return jsonify({"success":False,"error":f"Auth failed — Gmail requires an App Password, not your login password. Details: {e}"}), 400
+        return jsonify({"success": False,
+                        "error": f"Auth failed — Gmail requires an App Password, not your login password. {e}"}), 400
     except Exception as e:
-        return jsonify({"success":False,"error":str(e)}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/health")
 def api_health():
-    return jsonify({"status":"ok","scheduler":"running","smtp_configured": bool(SMTP_USER and SMTP_PASSWORD)})
+    return jsonify({
+        "status": "ok",
+        "scheduler": "running",
+        "smtp_configured": bool(SMTP_USER and SMTP_PASSWORD),
+    })
 
 # ─────────────────────────────────────────────────────────────────
 #  MAIN
@@ -1264,13 +1357,14 @@ if __name__ == "__main__":
         webbrowser.open("http://localhost:5000")
     threading.Thread(target=_open_browser, daemon=True).start()
 
-    print("\n" + "="*55)
-    print("  Techwish AI Analytics (FIXED)")
+    print("\n" + "="*60)
+    print("  Techwish AI Analytics — FULLY FIXED")
     print("  http://localhost:5000")
-    print("  Scheduler: running (background thread)")
-    print(f"  SMTP: {SMTP_USER or '(NOT CONFIGURED)'}")
+    print("  Scheduler : running (background thread)")
+    print(f"  SMTP      : {SMTP_USER or '(NOT CONFIGURED)'}")
     print("  Test email: http://localhost:5000/api/test-email")
-    print("="*55 + "\n")
+    print("  Health    : http://localhost:5000/api/health")
+    print("="*60 + "\n")
 
     def _shutdown(sig, frame):
         print("\nShutting down...")
