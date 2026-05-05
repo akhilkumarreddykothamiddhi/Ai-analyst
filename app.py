@@ -782,7 +782,7 @@ def render_chart_to_png(
     chart_color: str = DEFAULT_CHART_COLOR,
     chart_title: str = "",
 ) -> bytes | None:
-    """Render chart to PNG bytes. Used for email attachments."""
+    """Render chart to PNG bytes. Tries Plotly/kaleido first, falls back to matplotlib."""
     if not chart_type or chart_type == "none" or df is None or df.empty or not chart_x:
         return None
 
@@ -790,6 +790,7 @@ def render_chart_to_png(
     seq   = [color] + DEFAULT_BLUE_SEQUENCE
 
     col_keys = list(df.columns)
+
     def _resolve(name):
         if not name: return None
         if name in col_keys: return name
@@ -797,21 +798,87 @@ def render_chart_to_png(
 
     x_col = _resolve(chart_x) or col_keys[0]
     num_cols = [k for k in col_keys if pd.api.types.is_numeric_dtype(df[k])]
-    y_col = _resolve(chart_y) or (num_cols[0] if num_cols else None)
+    y_col = _resolve(chart_y) or (num_cols[0] if num_cols else (col_keys[1] if len(col_keys) > 1 else None))
 
-    def _mpl_bar_fallback(x_vals, y_vals, color, title) -> bytes:
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.bar([str(v) for v in x_vals], y_vals, color=color, edgecolor="none", width=0.6)
-        ax.set_facecolor("#f8f9fa"); fig.patch.set_facecolor("white")
-        ax.spines[["top","right"]].set_visible(False)
-        ax.tick_params(axis="x", rotation=45, labelsize=9)
-        if title: ax.set_title(title, fontsize=14, fontweight="bold", color=color, pad=12)
+    # ── Helper: always-works matplotlib bar ──────────────────────
+    def _mpl_render(x_vals, y_vals, chart_t, color, title, seq) -> bytes:
+        sns.set_theme(style="whitegrid")
+        is_pie = chart_t in ("pie", "donut")
+        figsize = (9, 9) if is_pie else (12, 6)
+        fig, ax = plt.subplots(figsize=figsize)
+
+        try:
+            if chart_t == "bar":
+                colors = [color] * len(x_vals)
+                ax.bar([str(v) for v in x_vals], y_vals, color=colors, edgecolor="none", width=0.6)
+                ax.set_facecolor("#f8f9fa")
+                fig.patch.set_facecolor("white")
+                ax.spines[["top", "right"]].set_visible(False)
+                ax.tick_params(axis="x", rotation=45, labelsize=9)
+
+            elif chart_t == "line":
+                ax.plot([str(v) for v in x_vals], y_vals, color=color, marker="o",
+                        linewidth=2.5, markersize=7)
+                ax.set_facecolor("#f8f9fa")
+                fig.patch.set_facecolor("white")
+                ax.spines[["top", "right"]].set_visible(False)
+                ax.tick_params(axis="x", rotation=45, labelsize=9)
+
+            elif chart_t == "area":
+                ax.fill_between(range(len(x_vals)), y_vals, alpha=0.4, color=color)
+                ax.plot(range(len(x_vals)), y_vals, color=color, linewidth=2.5)
+                ax.set_xticks(range(len(x_vals)))
+                ax.set_xticklabels([str(v) for v in x_vals], rotation=45, fontsize=9)
+                ax.set_facecolor("#f8f9fa")
+                fig.patch.set_facecolor("white")
+                ax.spines[["top", "right"]].set_visible(False)
+
+            elif chart_t in ("pie", "donut"):
+                wc = (seq * ((len(x_vals) // len(seq)) + 1))[:len(x_vals)]
+                wedge_props = {"width": 0.55} if chart_t == "donut" else {}
+                ax.pie([float(v) for v in y_vals],
+                       labels=[str(v) for v in x_vals],
+                       colors=wc, autopct="%1.1f%%",
+                       startangle=140, **wedge_props)
+                fig.patch.set_facecolor("white")
+
+            elif chart_t == "scatter":
+                ax.scatter([str(v) for v in x_vals], y_vals, color=color,
+                           s=80, alpha=0.85, edgecolors="none")
+                ax.set_facecolor("#f8f9fa")
+                fig.patch.set_facecolor("white")
+                ax.spines[["top", "right"]].set_visible(False)
+                ax.tick_params(axis="x", rotation=45, labelsize=9)
+
+            elif chart_t == "histogram":
+                ax.hist(y_vals, color=color, edgecolor="none", bins=20)
+                ax.set_facecolor("#f8f9fa")
+                fig.patch.set_facecolor("white")
+                ax.spines[["top", "right"]].set_visible(False)
+
+            else:
+                # Ultimate fallback — always a bar chart
+                ax.bar([str(v) for v in x_vals], y_vals, color=color,
+                       edgecolor="none", width=0.6)
+                ax.set_facecolor("#f8f9fa")
+                fig.patch.set_facecolor("white")
+                ax.spines[["top", "right"]].set_visible(False)
+                ax.tick_params(axis="x", rotation=45, labelsize=9)
+
+            if title:
+                ax.set_title(title, fontsize=14, fontweight="bold", color=color, pad=12)
+
+        except Exception as inner_e:
+            print(f"[render_chart] matplotlib inner error: {inner_e}")
+
         plt.tight_layout()
-        buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=160, bbox_inches="tight"); plt.close(fig)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+        plt.close(fig)
         return buf.getvalue()
 
+    # ── 1. Try Plotly + kaleido ───────────────────────────────────
     try:
-        # ── Try Plotly (best quality) ──────────────────────────────
         df2 = df.copy()
         if pd.api.types.is_numeric_dtype(df2[x_col]):
             df2[x_col] = df2[x_col].astype(str)
@@ -835,63 +902,26 @@ def render_chart_to_png(
             margin=dict(t=70, b=60, l=60, r=40),
             title=dict(font=dict(size=16, color=color)) if chart_title else {},
         )
-        try:
-            return fig.to_image(format="png", width=1200, height=600, scale=2)
-        except Exception:
-            # kaleido not installed — fall back to matplotlib
-            pass
+
+        png_bytes = fig.to_image(format="png", width=1200, height=600, scale=2)
+        if png_bytes and len(png_bytes) > 1000:   # sanity check — real PNG is always >1KB
+            print(f"[render_chart] Plotly/kaleido OK — {len(png_bytes):,} bytes")
+            return png_bytes
+        else:
+            print("[render_chart] Plotly returned suspiciously small PNG, falling back")
 
     except Exception as e:
-        print(f"[render_chart] Plotly failed: {e}")
+        print(f"[render_chart] Plotly/kaleido failed ({type(e).__name__}: {e}), using matplotlib")
 
-    # ── Matplotlib fallback ────────────────────────────────────────
+    # ── 2. Matplotlib fallback (always works) ─────────────────────
     try:
-        if chart_type.startswith("seaborn_"):
-            sns.set_theme(style="whitegrid")
-            fig, ax = plt.subplots(figsize=(12, 6))
-            if chart_type == "seaborn_bar" and y_col:
-                sns.barplot(data=df, x=x_col, y=y_col, color=color, ax=ax)
-            elif chart_type == "seaborn_line" and y_col:
-                sns.lineplot(data=df, x=x_col, y=y_col, color=color, ax=ax)
-            elif chart_type == "seaborn_violin" and y_col:
-                sns.violinplot(data=df, x=x_col, y=y_col, color=color, ax=ax)
-            elif chart_type == "seaborn_box" and y_col:
-                sns.boxplot(data=df, x=x_col, y=y_col, color=color, ax=ax)
-            else:
-                plt.close(fig)
-                return _mpl_bar_fallback(df[x_col], df[y_col] if y_col else df[col_keys[1]], color, chart_title)
-            if chart_title: ax.set_title(chart_title, fontsize=14, fontweight="bold", color=color, pad=10)
-            plt.tight_layout()
-            buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=160, bbox_inches="tight"); plt.close(fig)
-            return buf.getvalue()
-
-        if chart_type in ("bar","matplotlib_bar") and y_col:
-            return _mpl_bar_fallback(df[x_col], df[y_col], color, chart_title)
-
-        if chart_type in ("line","matplotlib_line") and y_col:
-            fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(df[x_col].astype(str), df[y_col], color=color, marker="o", linewidth=2.5)
-            ax.set_facecolor("#f8f9fa"); fig.patch.set_facecolor("white")
-            ax.spines[["top","right"]].set_visible(False)
-            ax.tick_params(axis="x", rotation=45, labelsize=9)
-            if chart_title: ax.set_title(chart_title, fontsize=14, fontweight="bold", color=color, pad=12)
-            plt.tight_layout()
-            buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=160, bbox_inches="tight"); plt.close(fig)
-            return buf.getvalue()
-
-        if chart_type in ("pie","matplotlib_pie","donut") and y_col:
-            wc = (seq * ((len(df) // len(seq)) + 1))[:len(df)]
-            fig, ax = plt.subplots(figsize=(9, 9))
-            wedge_props = {"width": 0.55} if chart_type == "donut" else {}
-            ax.pie(df[y_col], labels=df[x_col].astype(str), colors=wc,
-                   autopct="%1.1f%%", startangle=140, **wedge_props)
-            if chart_title: ax.set_title(chart_title, fontsize=14, fontweight="bold", color=color, pad=12)
-            plt.tight_layout()
-            buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=160, bbox_inches="tight"); plt.close(fig)
-            return buf.getvalue()
-
+        x_vals = list(df[x_col])
+        y_vals = list(df[y_col]) if y_col else [0] * len(x_vals)
+        png_bytes = _mpl_render(x_vals, y_vals, chart_type, color, chart_title, seq)
+        print(f"[render_chart] Matplotlib fallback OK — {len(png_bytes):,} bytes")
+        return png_bytes
     except Exception as e:
-        print(f"[render_chart] Matplotlib fallback failed: {e}")
+        print(f"[render_chart] Matplotlib fallback also failed: {e}\n{traceback.format_exc()}")
 
     return None
 
