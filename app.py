@@ -41,12 +41,12 @@ SCHEDULE_FILE = BASE_DIR / "scheduled_reports.json"
 LOG_FILE      = BASE_DIR / "scheduler.log"
 
 def _read_secrets() -> dict:
-    p = BASE_DIR / ".streamlit" / "secrets.toml"
+    p = BASE_DIR / ".env"
     out = {}
     if p.exists():
         for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()
-            if "=" in line and not line.startswith("#") and not line.startswith("["):
+            if "=" in line and not line.startswith("#"):
                 k, _, v = line.partition("=")
                 out[k.strip()] = v.strip().strip('"').strip("'")
     return out
