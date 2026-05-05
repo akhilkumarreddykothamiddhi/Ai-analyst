@@ -568,6 +568,8 @@ function closeEmailChartModal(){
   document.getElementById("email-chart-modal").classList.remove("open");
   _emailChartCid=null;
 }
+
+// ── FIXED: submitEmailChart — reads response as text first, guards empty sql ──
 async function submitEmailChart(){
   const cid=_emailChartCid;
   if(!cid){showToast("No chart selected","error");return;}
@@ -578,6 +580,11 @@ async function submitEmailChart(){
 
   const data=window._chartData?.[cid];
   if(!data){showToast("Chart data not found","error");return;}
+
+  // Guard: need either sql or question
+  const sql=(data.sql||"").trim();
+  const question=(data.question||subject||"Chart export").trim();
+  if(!sql && !question){showToast("No SQL or question found for this chart","error");return;}
 
   const chartType=document.getElementById("type-"+cid)?.value||"bar";
   const color=document.getElementById("color-"+cid)?.value||DEFAULT_CHART_COLOR;
@@ -592,8 +599,8 @@ async function submitEmailChart(){
       recipients: recipients,
       interval_minutes: 99999,
       database: selectedDb||"",
-      sql: data.sql||"",
-      question: data.question||title||"Chart export",
+      sql: sql,
+      question: question,
       chart_type: chartType,
       chart_x: data.chart_x||"",
       chart_y: data.chart_y||"",
@@ -603,20 +610,37 @@ async function submitEmailChart(){
       one_time: true,
     };
 
-    const cr=await fetch("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-    const cd=await cr.json();
-    if(!cd.success){showToast("Failed to send: "+(cd.error||"unknown"),"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
+    // Step 1: create schedule — read as text first to avoid JSON parse crash
+    let cr, cd;
+    try{
+      cr=await fetch("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+      const raw=await cr.text();
+      try{ cd=JSON.parse(raw); }
+      catch(e){ showToast("Server error (invalid response): "+raw.slice(0,80),"error"); btn.textContent="📤 Send Email";btn.disabled=false; return; }
+    }catch(e){ showToast("Network error: "+e.message,"error"); btn.textContent="📤 Send Email";btn.disabled=false; return; }
+
+    if(!cd.success){ showToast("Failed to create schedule: "+(cd.error||"unknown"),"error"); btn.textContent="📤 Send Email";btn.disabled=false; return; }
+
     const rid=cd.report?.id;
-    if(rid){
-      const rr=await fetch(`/api/schedules/${rid}/run`,{method:"POST"});
-      const rd=await rr.json();
-      if(rd.success){
-        showToast("✅ Chart emailed successfully!","success");
-        await fetch(`/api/schedules/${rid}`,{method:"DELETE"});
-        closeEmailChartModal();loadSchedules();
-      }else{showToast("Failed: "+(rd.error||"unknown"),"error");}
+    if(!rid){ showToast("No report ID returned","error"); btn.textContent="📤 Send Email";btn.disabled=false; return; }
+
+    // Step 2: run it immediately — read as text first
+    let rr, rd;
+    try{
+      rr=await fetch(`/api/schedules/${rid}/run`,{method:"POST"});
+      const raw2=await rr.text();
+      try{ rd=JSON.parse(raw2); }
+      catch(e){ showToast("Send error (invalid response): "+raw2.slice(0,80),"error"); btn.textContent="📤 Send Email";btn.disabled=false; return; }
+    }catch(e){ showToast("Network error on send: "+e.message,"error"); btn.textContent="📤 Send Email";btn.disabled=false; return; }
+
+    if(rd.success){
+      showToast("✅ Chart emailed successfully!","success");
+      await fetch(`/api/schedules/${rid}`,{method:"DELETE"});
+      closeEmailChartModal();loadSchedules();
+    }else{
+      showToast("Email failed: "+(rd.error||"unknown"),"error");
     }
-  }catch(e){showToast("Network error: "+e.message,"error");}
+  }catch(e){ showToast("Unexpected error: "+e.message,"error"); }
   btn.textContent="📤 Send Email";btn.disabled=false;
 }
 
