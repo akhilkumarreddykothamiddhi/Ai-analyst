@@ -7,28 +7,31 @@
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,300&display=swap" rel="stylesheet"/>
 <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
 <style>
-/* ══════════════════════════════════════════════
-   TECHWISH BRAND TOKENS — Blue · Black · White
-══════════════════════════════════════════════ */
 :root[data-theme="dark"]{
   --red:#D32F2F;--red-bright:#EF5350;--red-deep:#B71C1C;--red-glow:rgba(211,47,47,0.22);
   --bg:#0D0D0D;--surface:#141414;--card:#1A1A1A;--card2:#202020;
   --border:rgba(211,47,47,0.18);--border2:rgba(255,255,255,0.08);
-  --text:#F5F5F5;--muted:#6B6B6B;--subtle:#9E9E9E;
+  --text:#F5F5F5;--muted:#A0A0A0;--subtle:#C8C8C8;
   --green:#4CAF50;--gold:#FFC107;--blue:#1565C0;
   --shadow:0 4px 32px rgba(211,47,47,0.10);
   --topbar-bg:rgba(13,13,13,0.95);--input-bg:rgba(13,13,13,0.95);
   --chart-default:#1565C0;
+  --sidebar-label:#CFCFCF;
+  --sidebar-section-title:#EAEAEA;
+  --ctrl-label-color:#D0D0D0;
 }
 :root[data-theme="light"]{
   --red:#C62828;--red-bright:#D32F2F;--red-deep:#B71C1C;--red-glow:rgba(198,40,40,0.12);
   --bg:#FAFAFA;--surface:#FFFFFF;--card:#F5F5F5;--card2:#EEEEEE;
   --border:rgba(198,40,40,0.16);--border2:rgba(0,0,0,0.09);
-  --text:#1A1A1A;--muted:#9E9E9E;--subtle:#616161;
+  --text:#1A1A1A;--muted:#555555;--subtle:#333333;
   --green:#388E3C;--gold:#F9A825;--blue:#1565C0;
   --shadow:0 4px 24px rgba(198,40,40,0.10);
   --topbar-bg:rgba(250,250,250,0.97);--input-bg:rgba(250,250,250,0.97);
   --chart-default:#1565C0;
+  --sidebar-label:#333333;
+  --sidebar-section-title:#111111;
+  --ctrl-label-color:#333333;
 }
 *{margin:0;padding:0;box-sizing:border-box;}
 html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;transition:background .3s,color .3s;}
@@ -51,18 +54,20 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
 .brand-logo-fallback{display:none;align-items:center;gap:4px;font-family:'Syne',sans-serif;font-size:1.05rem;font-weight:800;color:var(--text);}
 .brand-logo-fallback .r{color:var(--red);}
 .brand-badge{margin-left:auto;background:var(--blue);color:#fff;font-size:0.56rem;font-weight:700;padding:2px 8px;border-radius:99px;letter-spacing:.1em;white-space:nowrap;}
-.db-label{font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:5px;}
+/* BRIGHTER DATABASE label */
+.db-label{font-size:0.68rem;text-transform:uppercase;letter-spacing:.13em;color:var(--sidebar-label);margin-bottom:5px;font-weight:700;}
 .db-select{width:100%;background:var(--card);border:1px solid var(--border2);color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.83rem;padding:8px 10px;border-radius:7px;cursor:pointer;outline:none;transition:border-color .2s;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%231565C0' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 9px center;padding-right:28px;}
 .db-select:focus{border-color:var(--blue);}
 [data-theme="dark"] .db-select option{background:#1A1A1A;color:#F5F5F5;}
 [data-theme="light"] .db-select option{background:#fff;color:#1A1A1A;}
 .sidebar-mid{flex:1;overflow-y:auto;padding:13px 15px;}
 .sidebar-section{margin-bottom:17px;}
-.sidebar-section-title{font-size:0.64rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:7px;display:flex;align-items:center;gap:6px;}
+/* BRIGHTER section titles */
+.sidebar-section-title{font-size:0.69rem;text-transform:uppercase;letter-spacing:.13em;color:var(--sidebar-section-title);margin-bottom:7px;display:flex;align-items:center;gap:6px;font-weight:700;}
 .pill-btn{width:100%;text-align:left;background:transparent;border:1px solid var(--border2);color:var(--subtle);font-family:'DM Sans',sans-serif;font-size:0.77rem;padding:7px 10px;border-radius:7px;cursor:pointer;transition:all .15s;margin-bottom:4px;line-height:1.5;}
 .pill-btn:hover{background:rgba(21,101,192,0.08);border-color:var(--blue);color:var(--text);}
 .schema-box{background:var(--card);border:1px solid var(--border2);border-radius:7px;padding:10px;font-size:0.69rem;font-family:'Courier New',monospace;color:var(--subtle);white-space:pre;overflow-x:auto;max-height:165px;overflow-y:auto;line-height:1.6;}
-.schema-toggle{width:100%;text-align:left;background:transparent;border:1px solid var(--border2);color:var(--muted);font-family:'DM Sans',sans-serif;font-size:0.76rem;padding:7px 11px;border-radius:7px;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:space-between;}
+.schema-toggle{width:100%;text-align:left;background:transparent;border:1px solid var(--border2);color:var(--sidebar-section-title);font-family:'DM Sans',sans-serif;font-size:0.76rem;padding:7px 11px;border-radius:7px;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:space-between;font-weight:600;}
 .schema-toggle:hover{border-color:var(--blue);color:var(--text);}
 .schema-box.hidden{display:none;}
 .pinned-chart-item{background:var(--card);border:1px solid var(--border2);border-radius:7px;padding:9px;margin-bottom:6px;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:7px;}
@@ -79,6 +84,20 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
 .sched-status{font-size:0.67rem;margin-top:7px;display:flex;align-items:center;gap:5px;color:var(--muted);}
 .sched-status .dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0;animation:pulse 2s infinite;}
 @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+
+/* ══ TRY ASKING DROPDOWN ══ */
+.questions-dropdown{border:1px solid var(--border2);border-radius:8px;overflow:hidden;background:var(--card);}
+.questions-dropdown-header{display:flex;align-items:center;justify-content:space-between;padding:8px 11px;cursor:pointer;user-select:none;transition:background .15s;}
+.questions-dropdown-header:hover{background:rgba(21,101,192,0.07);}
+.questions-dropdown-header-label{font-size:0.75rem;color:var(--sidebar-section-title);font-weight:600;display:flex;align-items:center;gap:6px;}
+.questions-dropdown-count{font-size:0.65rem;background:rgba(21,101,192,0.18);color:#42A5F5;padding:1px 7px;border-radius:99px;font-weight:600;}
+.questions-dropdown-arrow{font-size:0.7rem;color:var(--muted);transition:transform .22s cubic-bezier(.4,0,.2,1);}
+.questions-dropdown-arrow.open{transform:rotate(180deg);}
+.questions-dropdown-body{display:none;padding:6px 8px 8px;border-top:1px solid var(--border2);}
+.questions-dropdown-body.open{display:block;}
+.question-pill{width:100%;text-align:left;background:transparent;border:1px solid transparent;color:var(--subtle);font-family:'DM Sans',sans-serif;font-size:0.76rem;padding:6px 9px;border-radius:6px;cursor:pointer;transition:all .15s;margin-bottom:3px;line-height:1.5;display:block;}
+.question-pill:hover{background:rgba(21,101,192,0.09);border-color:rgba(21,101,192,0.22);color:var(--text);}
+.question-pill:last-child{margin-bottom:0;}
 
 /* ── MAIN ── */
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
@@ -142,8 +161,9 @@ tr:hover td{background:rgba(21,101,192,0.055);}
 /* ── CHART ── */
 .chart-wrap{border:1px solid var(--border2);border-radius:10px;overflow:hidden;background:rgba(21,101,192,0.012);width:100%;max-width:100%;box-sizing:border-box;}
 .chart-controls{display:flex;flex-wrap:wrap;gap:7px;padding:9px 12px;border-bottom:1px solid var(--border2);background:rgba(21,101,192,0.022);align-items:center;}
-.ctrl-group{display:flex;align-items:center;gap:4px;}
-.ctrl-label{font-size:0.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;white-space:nowrap;}
+.ctrl-group{display:flex;align-items:center;gap:5px;}
+/* BRIGHTER ctrl labels — "CHART TYPE", "COLOR", "TITLE" */
+.ctrl-label{font-size:0.67rem;color:var(--ctrl-label-color);text-transform:uppercase;letter-spacing:.07em;white-space:nowrap;font-weight:700;}
 .ctrl-select,.ctrl-input{background:var(--card);border:1px solid var(--border2);color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.75rem;padding:4px 7px;border-radius:6px;outline:none;transition:border-color .15s;}
 .ctrl-select:focus,.ctrl-input:focus{border-color:var(--blue);}
 [data-theme="dark"] .ctrl-select option{background:#1A1A1A;color:#F5F5F5;}
@@ -153,19 +173,23 @@ tr:hover td{background:rgba(21,101,192,0.055);}
 .hex-input{width:74px;background:var(--card);border:1px solid var(--border2);color:var(--text);font-family:'Courier New',monospace;font-size:0.69rem;padding:4px 6px;border-radius:6px;outline:none;transition:border-color .15s;text-transform:uppercase;}
 .hex-input:focus{border-color:var(--blue);}
 .hex-input.invalid{border-color:#EF5350;}
-.chart-div{padding:4px;height:680px;width:100%;min-width:0;}
+/* REDUCED HEIGHT — only height changed, width stays 100% */
+.chart-div{padding:4px;height:360px;width:100%;min-width:0;}
 .chart-axis-controls{display:flex;flex-wrap:wrap;gap:7px;padding:7px 12px;border-top:1px solid var(--border2);background:rgba(21,101,192,0.012);align-items:center;}
+/* BRIGHTER axis labels */
+.chart-axis-controls .ctrl-label{color:var(--ctrl-label-color);}
 .pin-btn,.dl-chart-btn,.email-chart-btn{background:transparent;border:1px solid var(--border2);color:var(--muted);font-family:'DM Sans',sans-serif;font-size:0.72rem;padding:4px 8px;border-radius:6px;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:3px;white-space:nowrap;}
 .pin-btn:hover{border-color:var(--gold);color:var(--gold);}
 .pin-btn.pinned{border-color:var(--gold);color:var(--gold);background:rgba(255,193,7,0.08);}
 .dl-chart-btn:hover{border-color:var(--blue);color:var(--blue);}
 .email-chart-btn:hover{border-color:var(--green);color:var(--green);}
 
-/* actions */
+/* ── ACTION ROW ── */
 .action-row{display:flex;gap:7px;flex-wrap:wrap;}
-.action-btn{background:transparent;border:1px solid var(--border2);color:var(--muted);font-family:'DM Sans',sans-serif;font-size:0.74rem;padding:5px 11px;border-radius:99px;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:4px;}
-.action-btn:hover{border-color:var(--blue);color:var(--blue);}
-.action-btn.primary{background:rgba(21,101,192,0.10);border-color:rgba(21,101,192,0.32);color:#42A5F5;}
+.action-btn{background:transparent;border:1px solid var(--border2);color:var(--subtle);font-family:'DM Sans',sans-serif;font-size:0.74rem;padding:5px 11px;border-radius:99px;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:4px;}
+.action-btn:hover{border-color:var(--blue);color:#42A5F5;background:rgba(21,101,192,0.07);}
+.action-btn.primary{background:rgba(21,101,192,0.10);border-color:rgba(21,101,192,0.32);color:#64B5F6;font-weight:500;}
+.action-btn.primary:hover{background:rgba(21,101,192,0.20);border-color:rgba(21,101,192,0.55);color:#90CAF9;}
 
 /* typing */
 .typing{display:flex;gap:4px;padding:11px 13px;background:var(--card);border:1px solid var(--border2);border-radius:10px;width:fit-content;}
@@ -205,8 +229,6 @@ tr:hover td{background:rgba(21,101,192,0.055);}
 .form-textarea{resize:vertical;min-height:80px;line-height:1.6;}
 [data-theme="light"] .form-select option{background:#fff;color:#1A1A1A;}
 [data-theme="dark"] .form-select option{background:#1A1A1A;color:#F5F5F5;}
-
-/* ══ SCHEDULE MODE SWITCHER ══ */
 .mode-switcher{display:flex;gap:0;border:1px solid var(--border2);border-radius:8px;overflow:hidden;margin-bottom:0;}
 .mode-btn{flex:1;padding:9px 14px;text-align:center;cursor:pointer;font-size:0.80rem;font-weight:500;color:var(--muted);background:transparent;border:none;font-family:'DM Sans',sans-serif;transition:background .15s,color .15s;border-right:1px solid var(--border2);}
 .mode-btn:last-child{border-right:none;}
@@ -214,17 +236,13 @@ tr:hover td{background:rgba(21,101,192,0.055);}
 .mode-btn:not(.active):hover{background:rgba(21,101,192,0.08);color:var(--text);}
 .nl-hint{font-size:0.71rem;color:var(--muted);margin-top:5px;line-height:1.6;padding:7px 10px;background:rgba(21,101,192,0.06);border:1px solid rgba(21,101,192,0.15);border-radius:6px;}
 .nl-hint strong{color:#42A5F5;}
-
 .sql-gen-status{font-size:0.72rem;padding:7px 10px;border-radius:6px;margin-top:5px;display:none;}
 .sql-gen-status.loading{display:block;background:rgba(21,101,192,0.07);border:1px solid rgba(21,101,192,0.2);color:#42A5F5;}
 .sql-gen-status.ok{display:block;background:rgba(76,175,80,0.07);border:1px solid rgba(76,175,80,0.2);color:var(--green);}
 .sql-gen-status.error{display:block;background:rgba(211,47,47,0.07);border:1px solid rgba(211,47,47,0.2);color:#EF5350;}
-
 .submit-btn{width:100%;background:var(--blue);color:#fff;border:none;font-family:'DM Sans',sans-serif;font-size:0.86rem;font-weight:600;padding:10px;border-radius:7px;cursor:pointer;transition:all .15s;margin-top:5px;}
 .submit-btn:hover{background:#1976D2;transform:translateY(-1px);}
 .submit-btn:disabled{opacity:0.55;cursor:not-allowed;transform:none;}
-
-/* schedule cards */
 .sched-card{background:var(--card);border:1px solid var(--border2);border-radius:9px;padding:12px;margin-bottom:7px;}
 .sched-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;}
 .sched-name{font-weight:600;font-size:0.85rem;}
@@ -237,8 +255,6 @@ tr:hover td{background:rgba(21,101,192,0.055);}
 .sched-btn:hover{border-color:var(--blue);color:var(--blue);}
 .sched-btn.danger:hover{border-color:#EF5350;color:#EF5350;}
 .sched-btn.run:hover{border-color:var(--green);color:var(--green);}
-
-/* toast */
 .toast-container{position:fixed;bottom:82px;right:19px;z-index:999;display:flex;flex-direction:column;gap:6px;}
 .toast{background:var(--surface);border:1px solid var(--border2);border-radius:9px;padding:10px 13px;font-size:0.79rem;color:var(--text);box-shadow:var(--shadow);display:flex;align-items:center;gap:6px;animation:slideIn .22s ease,fadeOut .4s ease 2.6s forwards;min-width:215px;max-width:380px;word-break:break-word;}
 @keyframes slideIn{from{opacity:0;transform:translateX(17px);}to{opacity:1;transform:translateX(0);}}
@@ -269,10 +285,21 @@ tr:hover td{background:rgba(21,101,192,0.055);}
           <div class="sidebar-section-title">📌 Pinned Charts</div>
           <div id="pinned-list"></div>
         </div>
+
+        <!-- TRY ASKING — now a dropdown -->
         <div class="sidebar-section" id="questions-section" style="display:none">
-          <div class="sidebar-section-title">💡 Try asking</div>
-          <div id="questions-list"></div>
+          <div class="questions-dropdown" id="questions-dropdown">
+            <div class="questions-dropdown-header" onclick="toggleQuestionsDropdown()">
+              <span class="questions-dropdown-header-label">
+                💡 Try Asking
+                <span class="questions-dropdown-count" id="questions-count">0</span>
+              </span>
+              <span class="questions-dropdown-arrow" id="questions-arrow">▼</span>
+            </div>
+            <div class="questions-dropdown-body" id="questions-body"></div>
+          </div>
         </div>
+
         <div class="sidebar-section" id="schema-section" style="display:none">
           <button class="schema-toggle" onclick="toggleSchema()">
             <span>📋 View Schema</span><span id="schema-arrow">▸</span>
@@ -350,35 +377,25 @@ tr:hover td{background:rgba(21,101,192,0.055);}
   </div>
 </div>
 
-<!-- ══════════════════════════════════════════════
-     SCHEDULE MODAL
-══════════════════════════════════════════════ -->
+<!-- SCHEDULE MODAL -->
 <div class="modal-backdrop" id="sched-modal">
   <div class="modal">
     <div class="modal-header">
       <span class="modal-title">⏰ Schedule Report</span>
       <button class="modal-close" onclick="closeScheduleModal()">✕</button>
     </div>
-
     <div class="form-group">
       <label class="form-label">Report Name</label>
       <input class="form-input" id="sched-name" placeholder="e.g. Daily Revenue Summary"/>
     </div>
-
     <div class="form-group">
       <label class="form-label">Query Mode</label>
       <div class="mode-switcher">
-        <button class="mode-btn active" id="mode-btn-nl" onclick="setSchedMode('nl')">
-          💬 Natural Language
-        </button>
-        <button class="mode-btn" id="mode-btn-sql" onclick="setSchedMode('sql')">
-          🖊 SQL Query
-        </button>
+        <button class="mode-btn active" id="mode-btn-nl" onclick="setSchedMode('nl')">💬 Natural Language</button>
+        <button class="mode-btn" id="mode-btn-sql" onclick="setSchedMode('sql')">🖊 SQL Query</button>
       </div>
     </div>
-
     <div id="sched-dynamic-panel"></div>
-
     <div class="form-group">
       <label class="form-label">Run Frequency</label>
       <select class="form-select" id="sched-interval">
@@ -390,19 +407,15 @@ tr:hover td{background:rgba(21,101,192,0.055);}
         <option value="1440">Daily (24 hours)</option>
       </select>
     </div>
-
     <div class="form-group">
       <label class="form-label">Recipient Email(s)</label>
       <input class="form-input" id="sched-emails" placeholder="user@example.com, another@example.com"/>
     </div>
-
     <button class="submit-btn" id="sched-submit-btn" onclick="submitSchedule()">➕ Add Schedule</button>
   </div>
 </div>
 
-<!-- ══════════════════════════════════════════════
-     EMAIL CHART MODAL
-══════════════════════════════════════════════ -->
+<!-- EMAIL CHART MODAL -->
 <div class="modal-backdrop email-modal" id="email-chart-modal">
   <div class="modal" style="width:420px;">
     <div class="modal-header">
@@ -435,6 +448,15 @@ let prefillSql="",prefillChartType="none",prefillChartX="",prefillChartY="",
 let isLoading=false,questionQueue=[],pinnedCharts=[],chartCounter=0;
 const DEFAULT_CHART_COLOR="#1565C0";
 let _emailChartCid=null;
+
+// ══ QUESTIONS DROPDOWN ══
+function toggleQuestionsDropdown(){
+  const body=document.getElementById("questions-body");
+  const arrow=document.getElementById("questions-arrow");
+  const isOpen=body.classList.contains("open");
+  body.classList.toggle("open",!isOpen);
+  arrow.classList.toggle("open",!isOpen);
+}
 
 // ══ MIC ══
 let recognition=null,isRecording=false;
@@ -487,11 +509,23 @@ function selectDatabase(db){
   document.getElementById("schema-section").style.display="block";
 }
 async function loadQuestions(db){
-  document.getElementById("questions-list").innerHTML='<div style="font-size:0.73rem;color:var(--muted);">Loading…</div>';
+  const body=document.getElementById("questions-body");
+  const count=document.getElementById("questions-count");
+  body.innerHTML='<div style="font-size:0.73rem;color:var(--muted);padding:6px 9px;">Loading…</div>';
   try{
     const r=await fetch(`/api/questions?database=${encodeURIComponent(db)}`),d=await r.json();
-    const el=document.getElementById("questions-list");el.innerHTML="";
-    d.questions.forEach(q=>{const b=document.createElement("button");b.className="pill-btn";b.textContent=q;b.onclick=()=>sendQuestion(q);el.appendChild(b);});
+    body.innerHTML="";
+    d.questions.forEach(q=>{
+      const b=document.createElement("button");
+      b.className="question-pill";
+      b.textContent=q;
+      b.onclick=()=>sendQuestion(q);
+      body.appendChild(b);
+    });
+    if(count) count.textContent=d.questions.length;
+    // Auto-open dropdown when questions load
+    body.classList.add("open");
+    document.getElementById("questions-arrow").classList.add("open");
   }catch(e){}
 }
 async function loadSchemaText(db){
@@ -535,91 +569,36 @@ function closeEmailChartModal(){
   document.getElementById("email-chart-modal").classList.remove("open");
   _emailChartCid=null;
 }
-
 async function submitEmailChart(){
   const cid=_emailChartCid;
   if(!cid){showToast("No chart selected","error");return;}
-
   const recipientsRaw=document.getElementById("email-chart-recipients").value.trim();
   if(!recipientsRaw){showToast("Please enter recipient email(s)","error");return;}
-
-  // FIX 2: validate emails client-side before sending
   const recipients=recipientsRaw.split(",").map(e=>e.trim()).filter(Boolean);
   if(!recipients.length){showToast("Please enter at least one valid email","error");return;}
-
   const subject=document.getElementById("email-chart-subject").value.trim()||"Techwish AI — Chart Report";
   const note=document.getElementById("email-chart-note").value.trim();
   const data=window._chartData?.[cid];
   if(!data){showToast("Chart data not found","error");return;}
-
   const sql=(data.sql||"").trim();
   const question=(data.question||subject||"Chart export").trim();
   if(!sql&&!question){showToast("No SQL or question found for this chart","error");return;}
-
   const chartType=document.getElementById("type-"+cid)?.value||"bar";
   const color=document.getElementById("color-"+cid)?.value||DEFAULT_CHART_COLOR;
   const title=document.getElementById("title-"+cid)?.value||"";
-
   const btn=document.getElementById("email-chart-submit-btn");
   btn.textContent="⏳ Sending…";btn.disabled=true;
-
   try{
-    // FIX 2: send recipients as comma-joined string — backend normalises to list
-    const payload={
-      name:subject,
-      recipients:recipients.join(", "),   // single string — backend splits it
-      interval_minutes:99999,
-      database:selectedDb||"",
-      sql:sql,
-      question:question,
-      chart_type:chartType,
-      chart_x:data.chart_x||"",
-      chart_y:data.chart_y||"",
-      chart_color:color,
-      chart_title:title,
-      note:note,
-      one_time:true,
-    };
-
-    // Create a one-time schedule
+    const payload={name:subject,recipients:recipients.join(", "),interval_minutes:99999,database:selectedDb||"",sql:sql,question:question,chart_type:chartType,chart_x:data.chart_x||"",chart_y:data.chart_y||"",chart_color:color,chart_title:title,note:note,one_time:true};
     let cr,cd;
-    try{
-      cr=await fetch("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-      const raw=await cr.text();
-      try{cd=JSON.parse(raw);}
-      catch(e){
-        showToast("Server error: "+raw.slice(0,120),"error");
-        btn.textContent="📤 Send Email";btn.disabled=false;return;
-      }
-    }catch(e){showToast("Network error: "+e.message,"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
-
-    if(!cd.success){
-      // FIX: surface the actual error message from the server
-      showToast("Failed: "+(cd.error||"Unknown server error"),"error");
-      btn.textContent="📤 Send Email";btn.disabled=false;return;
-    }
-
+    try{cr=await fetch("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});const raw=await cr.text();try{cd=JSON.parse(raw);}catch(e){showToast("Server error: "+raw.slice(0,120),"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}}catch(e){showToast("Network error: "+e.message,"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
+    if(!cd.success){showToast("Failed: "+(cd.error||"Unknown server error"),"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
     const rid=cd.report?.id;
     if(!rid){showToast("No report ID returned","error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
-
-    // Run the report immediately
     let rr,rd;
-    try{
-      rr=await fetch(`/api/schedules/${rid}/run`,{method:"POST"});
-      const raw2=await rr.text();
-      try{rd=JSON.parse(raw2);}
-      catch(e){showToast("Send error: "+raw2.slice(0,120),"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
-    }catch(e){showToast("Network error on send: "+e.message,"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
-
-    if(rd.success){
-      showToast("✅ Chart emailed successfully!","success");
-      // Clean up the one-time schedule
-      await fetch(`/api/schedules/${rid}`,{method:"DELETE"});
-      closeEmailChartModal();
-      loadSchedules();
-    }else{
-      showToast("Email failed: "+(rd.error||"unknown"),"error");
-    }
+    try{rr=await fetch(`/api/schedules/${rid}/run`,{method:"POST"});const raw2=await rr.text();try{rd=JSON.parse(raw2);}catch(e){showToast("Send error: "+raw2.slice(0,120),"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}}catch(e){showToast("Network error on send: "+e.message,"error");btn.textContent="📤 Send Email";btn.disabled=false;return;}
+    if(rd.success){showToast("✅ Chart emailed successfully!","success");await fetch(`/api/schedules/${rid}`,{method:"DELETE"});closeEmailChartModal();loadSchedules();}
+    else{showToast("Email failed: "+(rd.error||"unknown"),"error");}
   }catch(e){showToast("Unexpected error: "+e.message,"error");}
   btn.textContent="📤 Send Email";btn.disabled=false;
 }
@@ -724,7 +703,7 @@ function appendAssistantBubble(data,question){
   if(hasChart){
     html+=`<div class="chart-wrap" id="wrap-${cid}">
       <div class="chart-controls" id="ctrl-${cid}">
-        <div class="ctrl-group"><span class="ctrl-label">Type</span><select class="ctrl-select" id="type-${cid}" onchange="rerender('${cid}')">${buildChartTypeOptions(data.chart)}</select></div>
+        <div class="ctrl-group"><span class="ctrl-label">Chart Type</span><select class="ctrl-select" id="type-${cid}" onchange="rerender('${cid}')">${buildChartTypeOptions(data.chart)}</select></div>
         <div class="ctrl-group"><span class="ctrl-label">Color</span>
           <div class="color-group">
             <input type="color" class="ctrl-input" id="color-${cid}" value="${escHtml(chartColor)}" oninput="syncColorFromPicker('${cid}')"/>
@@ -750,15 +729,38 @@ function appendAssistantBubble(data,question){
     </div>`;
   }
 
+  // ── ACTION ROW — Download CSV + Schedule buttons ──
   const hasData=data.rows&&data.rows.length>0;
-  html+=`<div class="action-row">
-    ${data.sql?`<button class="action-btn primary" onclick="openScheduleFromMsg(${JSON.stringify(data.sql||'')},${JSON.stringify(data.chart||'none')},${JSON.stringify(data.chart_x||'')},${JSON.stringify(data.chart_y||'')},${JSON.stringify(chartColor)},${JSON.stringify(data.chart_title||'')})">⏰ Schedule This</button>`:""}
-    ${hasData?`<button class="action-btn" onclick="downloadCsv(${JSON.stringify(data.rows||[])},${JSON.stringify(data.columns||[])})">⬇ Download CSV</button>`:""}
-  </div>`;
+  const rowsJson=JSON.stringify(data.rows||[]);
+  const colsJson=JSON.stringify(data.columns||[]);
+  const sqlJson=JSON.stringify(data.sql||'');
+  const chartJson=JSON.stringify(data.chart||'none');
+  const cxJson=JSON.stringify(data.chart_x||'');
+  const cyJson=JSON.stringify(data.chart_y||'');
+  const colorJson=JSON.stringify(chartColor);
+  const titleJson=JSON.stringify(data.chart_title||'');
+
+  html+=`<div class="action-row">`;
+  if(data.sql){
+    html+=`<button class="action-btn primary" onclick='openScheduleFromMsg(${sqlJson},${chartJson},${cxJson},${cyJson},${colorJson},${titleJson})'>⏰ Schedule This</button>`;
+  }
+  if(hasData){
+    html+=`<button class="action-btn" id="dlcsv-${cid}" onclick="handleDownloadCsv(this,'${cid}')">⬇ Download CSV</button>`;
+  }
+  html+=`</div>`;
 
   const div=document.createElement("div");div.className="message";
   div.innerHTML=`<div class="avatar ai">T</div><div class="bubble">${html}</div>`;
   area.appendChild(div);scrollBottom();
+
+  // Store rows/columns on element for CSV download
+  if(hasData){
+    const dlBtn=div.querySelector(`#dlcsv-${cid}`);
+    if(dlBtn){
+      dlBtn._rows=data.rows;
+      dlBtn._columns=data.columns;
+    }
+  }
 
   if(hasChart){
     window._chartData=window._chartData||{};
@@ -771,6 +773,15 @@ function appendAssistantBubble(data,question){
       renderPlotly(cid,data.chart,data.rows,data.columns,data.chart_x,data.chart_y,chartColor,data.chart_title||"","","");
       setSuggestions(cid,data.chart_x,data.chart_y);scrollBottom();
     },100));
+  }
+}
+
+// CSV download via element data (avoids JSON serialisation issues in onclick)
+function handleDownloadCsv(btn, cid){
+  if(btn._rows && btn._columns){
+    downloadCsv(btn._rows, btn._columns);
+  } else {
+    showToast("No data to download","error");
   }
 }
 
@@ -813,22 +824,19 @@ function renderPlotly(cid,chartType,rows,columns,chartX,chartY,color,title,xAxis
   let xCol=resolveCol(chartX)||colKeys[0];
   const numCols=colKeys.filter(k=>rows.some(r=>typeof r[k]==="number"||(!isNaN(parseFloat(r[k]))&&String(r[k]).replace(/[$₹,]/g,"")!=="")));
   let yCol=resolveCol(chartY)||numCols.find(k=>k!==xCol)||colKeys[1];
-  const xVals=rows.map(r=>{
-    const v=r[xCol];
-    if(typeof v==="number"||(!isNaN(Number(v))&&String(v).trim()!==""&&!String(v).includes("."))){return String(v);}
-    return v;
-  });
+  const xVals=rows.map(r=>{const v=r[xCol];if(typeof v==="number"||(!isNaN(Number(v))&&String(v).trim()!==""&&!String(v).includes("."))){return String(v);}return v;});
   const yVals=rows.map(r=>{const v=r[yCol];return typeof v==="number"?v:parseFloat(String(v).replace(/[$₹,]/g,""))||0;});
   const tc=isDark?"#888":"#555",gc=isDark?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.05)";
   const layout={
     paper_bgcolor:"rgba(0,0,0,0)",plot_bgcolor:"rgba(0,0,0,0)",
     font:{family:"DM Sans,sans-serif",color:tc,size:12},
-    margin:{t:title?56:30,b:50,l:58,r:18},
+    margin:{t:title?46:24,b:44,l:52,r:16},
     title:title?{text:title,font:{color:c,size:13.5,family:"Syne,sans-serif"},x:0.02}:undefined,
     xaxis:{showgrid:false,zeroline:false,color:tc,tickfont:{color:tc,size:11},type:"category",title:xAxisTitle?{text:xAxisTitle,font:{color:tc,size:11}}:undefined},
     yaxis:{gridcolor:gc,zeroline:false,color:tc,tickfont:{color:tc,size:11},title:yAxisTitle?{text:yAxisTitle,font:{color:tc,size:11}}:undefined},
     legend:{font:{color:tc},bgcolor:"rgba(0,0,0,0)"},
-    autosize:true,height:650,
+    autosize:true,
+    height:340,  /* matches .chart-div height minus padding */
   };
   const cfg={responsive:true,displayModeBar:false,autosizable:true};
   const shades=genShades(c,Math.max(xVals.length,6));
@@ -838,11 +846,11 @@ function renderPlotly(cid,chartType,rows,columns,chartX,chartY,color,title,xAxis
     case "line":   traces=[{type:"scatter",mode:"lines+markers",x:xVals,y:yVals,line:{color:c,width:2.8,shape:"spline"},marker:{color:c,size:7},fill:"none",hovertemplate:'<b>%{x}</b><br>%{y}<extra></extra>'}];break;
     case "area":   traces=[{type:"scatter",mode:"lines",x:xVals,y:yVals,fill:"tozeroy",line:{color:c,shape:"spline",width:2.5},fillcolor:c+"2e",hovertemplate:'<b>%{x}</b><br>%{y}<extra></extra>'}];break;
     case "scatter":traces=[{type:"scatter",mode:"markers",x:xVals,y:yVals,marker:{color:c,size:10,opacity:0.85},hovertemplate:'<b>%{x}</b><br>%{y}<extra></extra>'}];break;
-    case "pie":    traces=[{type:"pie",labels:xVals,values:yVals,marker:{colors:shades},textfont:{color:"#fff"},hovertemplate:'<b>%{label}</b><br>%{value} (%{percent})<extra></extra>'}];layout.margin={t:title?56:18,b:8,l:8,r:8};break;
-    case "donut":  traces=[{type:"pie",labels:xVals,values:yVals,hole:0.44,marker:{colors:shades},textfont:{color:"#fff"},hovertemplate:'<b>%{label}</b><br>%{value} (%{percent})<extra></extra>'}];layout.margin={t:title?56:18,b:8,l:8,r:8};break;
+    case "pie":    traces=[{type:"pie",labels:xVals,values:yVals,marker:{colors:shades},textfont:{color:"#fff"},hovertemplate:'<b>%{label}</b><br>%{value} (%{percent})<extra></extra>'}];layout.margin={t:title?46:18,b:8,l:8,r:8};break;
+    case "donut":  traces=[{type:"pie",labels:xVals,values:yVals,hole:0.44,marker:{colors:shades},textfont:{color:"#fff"},hovertemplate:'<b>%{label}</b><br>%{value} (%{percent})<extra></extra>'}];layout.margin={t:title?46:18,b:8,l:8,r:8};break;
     case "histogram":traces=[{type:"histogram",x:xVals,marker:{color:c,opacity:0.88}}];break;
     case "funnel": traces=[{type:"funnel",y:xVals,x:yVals,marker:{color:shades},textinfo:"value+percent initial"}];break;
-    case "treemap":traces=[{type:"treemap",labels:xVals,values:yVals,parents:xVals.map(()=>""),marker:{colorscale:[[0,c+"66"],[1,c]]}}];layout.margin={t:title?56:18,b:8,l:8,r:8};break;
+    case "treemap":traces=[{type:"treemap",labels:xVals,values:yVals,parents:xVals.map(()=>""),marker:{colorscale:[[0,c+"66"],[1,c]]}}];layout.margin={t:title?46:18,b:8,l:8,r:8};break;
     default:traces=[{type:"bar",x:xVals,y:yVals,marker:{color:c,opacity:0.91}}];
   }
   Plotly.react(cid,traces,layout,cfg);
@@ -859,12 +867,8 @@ function rerender(cid){
     document.getElementById("ytitle-"+cid)?.value||"");
 }
 
-// ══════════════════════════════════════════════════════════════
-//  SCHEDULE MODAL
-// ══════════════════════════════════════════════════════════════
-
+// ══ SCHEDULE MODAL ══
 function openScheduleModal(){document.getElementById("sched-modal").classList.add("open");}
-
 function closeScheduleModal(){
   document.getElementById("sched-modal").classList.remove("open");
   const name=document.getElementById("sched-name");if(name)name.value="";
@@ -875,7 +879,6 @@ function closeScheduleModal(){
   if(btn){btn.textContent="➕ Add Schedule";btn.disabled=false;}
   setSchedMode("nl");
 }
-
 function setSchedMode(mode){
   schedMode=mode;
   document.getElementById("mode-btn-nl").classList.toggle("active",mode==="nl");
@@ -886,10 +889,7 @@ function setSchedMode(mode){
       <label class="form-label">Question(s)</label>
       <textarea class="form-textarea" id="sched-question" rows="4"
         placeholder="Enter one or more questions, one per line:&#10;&#10;What is the total revenue this month?&#10;Who are the top 10 customers?&#10;Which products have the highest sales?"></textarea>
-      <div class="nl-hint">
-        💡 <strong>Multiple questions supported</strong> — one per line.
-        A separate schedule is created for each question automatically.
-      </div>
+      <div class="nl-hint">💡 <strong>Multiple questions supported</strong> — one per line. A separate schedule is created for each question automatically.</div>
       <div class="sql-gen-status" id="nl-sql-status"></div>
     </div>`;
   } else {
@@ -899,136 +899,73 @@ function setSchedMode(mode){
         placeholder="SELECT column1, column2&#10;FROM your_table&#10;WHERE condition&#10;LIMIT 100"
         style="font-family:'Courier New',monospace;font-size:0.77rem;"></textarea>
     </div>`;
-    if(prefillSql){
-      const el=document.getElementById("sched-sql");
-      if(el) el.value=prefillSql;
-    }
+    if(prefillSql){const el=document.getElementById("sched-sql");if(el) el.value=prefillSql;}
   }
 }
-
 function openScheduleFromMsg(sql,chartType,chartX,chartY,chartColor,chartTitle){
-  prefillSql=sql; prefillChartType=chartType; prefillChartX=chartX;
-  prefillChartY=chartY; prefillChartColor=chartColor||DEFAULT_CHART_COLOR; prefillChartTitle=chartTitle;
-  openScheduleModal();
-  setSchedMode("sql");
+  prefillSql=sql;prefillChartType=chartType;prefillChartX=chartX;
+  prefillChartY=chartY;prefillChartColor=chartColor||DEFAULT_CHART_COLOR;prefillChartTitle=chartTitle;
+  openScheduleModal();setSchedMode("sql");
 }
-
 async function submitSchedule(){
   const name=document.getElementById("sched-name").value.trim();
   const emails=document.getElementById("sched-emails").value.trim();
   const interval=document.getElementById("sched-interval").value;
   const btn=document.getElementById("sched-submit-btn");
-
   if(!name){showToast("Please enter a report name","error");return;}
   if(!emails){showToast("Please enter recipient email(s)","error");return;}
   if(!selectedDb){showToast("Please select a database first","error");return;}
-
   btn.disabled=true;
-
   if(schedMode==="sql"){
     const sqlEl=document.getElementById("sched-sql");
     const sql=sqlEl?sqlEl.value.trim():"";
     if(!sql){showToast("Please enter a SQL query","error");btn.disabled=false;return;}
     btn.textContent="⏳ Validating SQL…";
-    const payload={
-      name, recipients:emails, interval_minutes:Number(interval), database:selectedDb,
-      sql:sql.replace(/;+$/,""), question:name,
-      chart_type:prefillChartType||"none",
-      chart_x:prefillChartX||"",
-      chart_y:prefillChartY||"",
-      chart_color:prefillChartColor||DEFAULT_CHART_COLOR,
-      chart_title:prefillChartTitle||""
-    };
+    const payload={name,recipients:emails,interval_minutes:Number(interval),database:selectedDb,sql:sql.replace(/;+$/,""),question:name,chart_type:prefillChartType||"none",chart_x:prefillChartX||"",chart_y:prefillChartY||"",chart_color:prefillChartColor||DEFAULT_CHART_COLOR,chart_title:prefillChartTitle||""};
     try{
       const r=await fetch("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-      const raw=await r.text();
-      let d;
+      const raw=await r.text();let d;
       try{d=JSON.parse(raw);}catch(e){showToast("Server error: "+raw.slice(0,80),"error");btn.textContent="➕ Add Schedule";btn.disabled=false;return;}
       if(d.success){showToast("✅ Schedule added!","success");closeScheduleModal();loadSchedules();}
       else showToast("Error: "+(d.error||"Unknown error"),"error");
     }catch(e){showToast("Network error: "+e.message,"error");}
-    btn.textContent="➕ Add Schedule";btn.disabled=false;
-    return;
+    btn.textContent="➕ Add Schedule";btn.disabled=false;return;
   }
-
-  // NL mode — multi-question support
   const questionEl=document.getElementById("sched-question");
   const rawQuestion=questionEl?questionEl.value.trim():"";
   if(!rawQuestion){showToast("Please enter at least one question","error");btn.disabled=false;return;}
-
   const questions=rawQuestion.split(/\n+/).map(q=>q.trim()).filter(Boolean);
   if(questions.length===0){showToast("Please enter at least one question","error");btn.disabled=false;return;}
-
   const statusEl=document.getElementById("nl-sql-status");
   if(questions.length>1) showToast(`⏳ Adding ${questions.length} schedules…`,"");
-
-  let created=0;
-  const failed=[];
-
+  let created=0;const failed=[];
   for(let i=0;i<questions.length;i++){
     const q=questions[i];
     const schedName=questions.length>1?`${name} (${i+1}/${questions.length})`:name;
-
-    if(statusEl){
-      statusEl.className="sql-gen-status loading";
-      statusEl.textContent=`⏳ Generating SQL for: "${q.slice(0,50)}${q.length>50?"…":""}" (${i+1}/${questions.length})`;
-    }
+    if(statusEl){statusEl.className="sql-gen-status loading";statusEl.textContent=`⏳ Generating SQL for: "${q.slice(0,50)}${q.length>50?"…":""}" (${i+1}/${questions.length})`;}
     btn.textContent=`⏳ Processing ${i+1}/${questions.length}…`;
-
-    const payload={
-      name:schedName, recipients:emails,
-      interval_minutes:Number(interval), database:selectedDb,
-      question:q, sql:"",
-      chart_type:"none", chart_x:"", chart_y:"",
-      chart_color:DEFAULT_CHART_COLOR, chart_title:""
-    };
+    const payload={name:schedName,recipients:emails,interval_minutes:Number(interval),database:selectedDb,question:q,sql:"",chart_type:"none",chart_x:"",chart_y:"",chart_color:DEFAULT_CHART_COLOR,chart_title:""};
     try{
       const r=await fetch("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-      const raw=await r.text();
-      let d;
+      const raw=await r.text();let d;
       try{d=JSON.parse(raw);}catch(e){failed.push({q,reason:"Server returned invalid JSON: "+raw.slice(0,60)});continue;}
-      if(d.success){
-        created++;
-        if(statusEl){statusEl.className="sql-gen-status ok";statusEl.textContent=`✅ SQL generated for: "${q.slice(0,50)}${q.length>50?"…":""}"`;};
-      }else{
-        failed.push({q,reason:d.error||"Unknown error"});
-        if(statusEl){statusEl.className="sql-gen-status error";statusEl.textContent=`❌ Failed: ${d.error||"Unknown error"}`;}
-      }
+      if(d.success){created++;if(statusEl){statusEl.className="sql-gen-status ok";statusEl.textContent=`✅ SQL generated for: "${q.slice(0,50)}${q.length>50?"…":""}"`;};}
+      else{failed.push({q,reason:d.error||"Unknown error"});if(statusEl){statusEl.className="sql-gen-status error";statusEl.textContent=`❌ Failed: ${d.error||"Unknown error"}`;};}
     }catch(e){failed.push({q,reason:"Network error: "+e.message});}
-
-    // Small delay between NL questions to avoid Groq rate limits
     if(i<questions.length-1) await new Promise(res=>setTimeout(res,2500));
   }
-
   btn.textContent="➕ Add Schedule";btn.disabled=false;
-
-  if(created>0){
-    showToast(`✅ ${created} schedule${created>1?"s":""} added!`,"success");
-    if(failed.length===0) closeScheduleModal();
-    loadSchedules();
-    if(statusEl&&failed.length===0){statusEl.className="sql-gen-status ok";statusEl.textContent=`✅ All ${created} schedule(s) created successfully.`;}
-  }
-  failed.forEach(({q,reason})=>{
-    const short=q.length>40?q.slice(0,40)+"…":q;
-    setTimeout(()=>showToast(`⚠ Failed: "${short}" — ${reason}`,"error"),200);
-  });
+  if(created>0){showToast(`✅ ${created} schedule${created>1?"s":""} added!`,"success");if(failed.length===0) closeScheduleModal();loadSchedules();if(statusEl&&failed.length===0){statusEl.className="sql-gen-status ok";statusEl.textContent=`✅ All ${created} schedule(s) created successfully.`;}}
+  failed.forEach(({q,reason})=>{const short=q.length>40?q.slice(0,40)+"…":q;setTimeout(()=>showToast(`⚠ Failed: "${short}" — ${reason}`,"error"),200);});
 }
-
 async function loadSchedules(){
   try{
     const r=await fetch("/api/schedules"),d=await r.json();
     const el=document.getElementById("schedules-list");
     if(!d.schedules||d.schedules.length===0){el.innerHTML='<div style="font-size:0.72rem;color:var(--muted);">No schedules yet.</div>';return;}
     el.innerHTML=d.schedules.map(s=>`<div class="sched-card">
-      <div class="sched-card-header">
-        <span class="sched-name">${escHtml(s.name)}</span>
-        <span class="sched-status-badge ${s.active?'active':'paused'}">${s.active?'Active':'Paused'}</span>
-      </div>
-      <div class="sched-meta">
-        <span>⏱ Every ${s.interval_minutes}min</span>
-        <span>📧 ${escHtml((Array.isArray(s.recipients)?s.recipients:[s.recipients]).join(", "))}</span>
-        ${s.last_status?`<span>${s.last_status.startsWith("Sent")?"✅":"❌"} ${s.last_run?new Date(s.last_run).toLocaleString():""}</span>`:""}
-      </div>
+      <div class="sched-card-header"><span class="sched-name">${escHtml(s.name)}</span><span class="sched-status-badge ${s.active?'active':'paused'}">${s.active?'Active':'Paused'}</span></div>
+      <div class="sched-meta"><span>⏱ Every ${s.interval_minutes}min</span><span>📧 ${escHtml((Array.isArray(s.recipients)?s.recipients:[s.recipients]).join(", "))}</span>${s.last_status?`<span>${s.last_status.startsWith("Sent")?"✅":"❌"} ${s.last_run?new Date(s.last_run).toLocaleString():""}</span>`:""}</div>
       ${s.fail_count>=3&&!s.active?`<div style="font-size:0.67rem;color:#EF5350;margin-bottom:6px;">⛔ Deactivated after 3 failures — fix and resume</div>`:""}
       ${s.last_status&&!s.last_status.startsWith("Sent")?`<div style="font-size:0.67rem;color:#EF5350;margin-bottom:6px;word-break:break-word;">⚠ ${escHtml(s.last_status)}</div>`:""}
       <div class="sched-actions">
@@ -1039,28 +976,19 @@ async function loadSchedules(){
     </div>`).join("");
   }catch(e){}
 }
-
 async function runSchedule(id){
   showToast("Sending email…","");
   try{
     const r=await fetch(`/api/schedules/${id}/run`,{method:"POST"});
-    const raw=await r.text();
-    let d;
+    const raw=await r.text();let d;
     try{d=JSON.parse(raw);}catch(e){showToast("Server error: "+raw.slice(0,80),"error");return;}
     if(d.success)showToast("✅ Email sent!","success");
     else showToast("Failed: "+(d.error||"Unknown error"),"error");
     loadSchedules();
   }catch(e){showToast("Network error: "+e.message,"error");}
 }
-async function toggleSchedule(id){
-  await fetch(`/api/schedules/${id}/toggle`,{method:"POST"});
-  loadSchedules();
-}
-async function deleteSchedule(id){
-  if(!confirm("Delete this schedule?"))return;
-  await fetch(`/api/schedules/${id}`,{method:"DELETE"});
-  showToast("Schedule deleted","");loadSchedules();
-}
+async function toggleSchedule(id){await fetch(`/api/schedules/${id}/toggle`,{method:"POST"});loadSchedules();}
+async function deleteSchedule(id){if(!confirm("Delete this schedule?"))return;await fetch(`/api/schedules/${id}`,{method:"DELETE"});showToast("Schedule deleted","");loadSchedules();}
 
 // ══ UTILS ══
 function scrollBottom(){const a=document.getElementById("chat-area");requestAnimationFrame(()=>{a.scrollTop=a.scrollHeight;});}
@@ -1077,7 +1005,6 @@ function downloadCsv(rows,columns){
   const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="techwish_export.csv";a.click();
 }
 
-// Close modals on backdrop click
 document.getElementById("sched-modal").addEventListener("click",function(e){if(e.target===this)closeScheduleModal();});
 document.getElementById("email-chart-modal").addEventListener("click",function(e){if(e.target===this)closeEmailChartModal();});
 </script>
